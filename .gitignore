@@ -1,5 +1,5 @@
 /.github
 /.vscode
-TLdata/
-outputs/
-output/
+/TLdata/
+/outputs/
+/output/
