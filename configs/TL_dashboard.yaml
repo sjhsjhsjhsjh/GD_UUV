@@ -1,0 +1,53 @@
+﻿dashboard:
+    # -------------------- data io --------------------
+    # terrain NPZ path (relative to project root)
+    terrain_npz_path: TLdata/qianshui.npz
+    # TL cache NPZ path (relative to project root)
+    tl_cache_npz_path: TLdata/qianshui_tl_cache.npz
+    # preprocessed frontend data output directory
+    output_data_dir: dashboards/TL_npz_dashboard/data
+
+    # -------------------- preprocessing --------------------
+    # sampling step on our axes, 1 means no downsampling
+    sample_step_x: 1
+    sample_step_y: 1
+    sample_step_z: 1
+    # whether to use pair_mask for validity filtering
+    use_pair_mask: true
+    # NaN policy: drop or keep
+    nan_policy: drop
+
+    # -------------------- frontend rendering --------------------
+    # TL color range in dB, null means auto from data
+    tl_color_min_db: null
+    tl_color_max_db: null
+    # TL color clamp threshold in dB, values above it will be clipped for coloring
+    tl_color_cap_db: 120
+    # point z visual scale factor (for TL point cloud)
+    z_visual_scale: 0.01
+    # terrain depth exaggeration factor
+    terrain_z_exaggeration: 10
+
+    # -------------------- plotly rendering --------------------
+    plotly_config:
+        marker_size: 4.0
+        marker_opacity: 0.78
+        terrain_marker_size: 2.8
+        terrain_opacity: 0.42
+        colorscale: Viridis
+
+    # -------------------- initial enemy position --------------------
+    initial_enemy_y_km: 5.0
+    initial_enemy_z_m: 150.0
+
+    # -------------------- camera and scene --------------------
+    camera_position:
+        x: 1.55
+        y: 1.45
+        z: 1.15
+    background_top_color: '#040b15'
+    background_bottom_color: '#07111f'
+
+    # -------------------- debug --------------------
+    # whether to print detailed stats after preprocessing
+    verbose_stats: true

@@ -1,0 +1,69 @@
+env:
+  # ---------------真实地形参数-------------------
+  # 地形文件
+  bty_file_name: qianshui.bty
+  # 地形长度（X轴实际长度）（单位:米）
+  true_map_width: 10000
+  # 地形宽度（Y轴实际长度）（单位:米）
+  true_map_height: 10000
+  # 地形深度（Z轴实际长度）（单位:米）
+  true_map_depth: 550
+
+  # ---------------网格化参数-------------------
+  # 对于实际地形的 X 采样间隔（单位:米）
+  sampling_x_step: 100
+  # 对于实际地形的 Y 采样间隔（单位:米）
+  sampling_y_step: 100
+  # 对于实际地形的 Z 采样间隔（单位:米）
+  sampling_z_step: 50
+
+  # 根据以上信息，不难得到，实际的地形网格参数
+  # 网格化是手动预处理的，对于训练程序而言，上面的参数无实际意义
+  map_width: 101
+  map_height: 101
+  map_depth: 11
+
+  # ---------------位置规则参数定义-------------------
+  # 敌方移动范围（全局生效）
+  enemy_x: 2000
+  enemy_y_min: 1000
+  enemy_y_max: 9000
+  enemy_z: 150
+
+  # 我方移动范围（全局生效）
+  uuv_x_min: 2000
+  uuv_x_max: 9000
+  uuv_y_min: 1000
+  uuv_y_max: 9000
+  uuv_z_min: 50
+  uuv_z_max: 250
+
+  # 我方初始化区域范围
+  uuv_init_x_min: 8000
+  uuv_init_x_max: 9000
+  uuv_init_y_min: 1000
+  uuv_init_y_max: 9000
+
+  # ---------------游戏参数定义-------------------
+  # 被动声呐探测方程 SL-TL-(NL-DI) > DT
+  # 注意，为了效果好看，实际需要统计实验区域的TL分布，然后再设计这几个参数。不然很可能没有任何效果。
+  # 自身 SL
+  uuv_SL: 110
+  # TL 通常是：
+  # NL: 环境噪声级，单位dB
+  NL: 80
+  # DI: 方向性增益，单位dB
+  DI: 25
+  # DT: 探测阈值，单位dB
+  DT: 5
+
+  # 最大推荐步数，超出此步数有超限惩罚
+  max_recommand_step_scaling_factor: 1.5
+
+  # ---------------BTY处理脚本输出配置-------------------
+  # 重采样后地形数据输出路径（相对于项目根目录）
+  terrain_output_path: output/bty/terrain.npz
+  # 是否生成可视化图像
+  enable_visualization: true
+  # 可视化图像输出目录
+  visualization_output_dir: output/bty

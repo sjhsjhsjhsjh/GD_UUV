@@ -1,0 +1,29 @@
+dashboard:
+  # -------------------- data io --------------------
+  # keypoint NPZ path (relative to project root)
+  keypoint_npz_path: output/keypoints/key_points.npz
+  # terrain NPZ path for 3D seabed surface
+  terrain_npz_path: output/bty/terrain.npz
+  # preprocessed frontend data output directory
+  output_data_dir: dashboards/keypoints_dashboard/data
+
+  # -------------------- color mapping --------------------
+  # keypoint color range (null means auto)
+  color_min: null
+  color_max: null
+
+  # -------------------- camera --------------------
+  camera_position:
+    x: 1.55
+    y: 1.55
+    z: 1.25
+
+  # -------------------- plotly style --------------------
+  plotly_config:
+    marker_size: 1.5
+    marker_opacity: 0.42
+    terrain_opacity: 0.8
+    colorscale: Turbo
+
+  # -------------------- misc --------------------
+  verbose_stats: true

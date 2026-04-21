@@ -1,0 +1,41 @@
+file_config:
+  # 输入文件路径，包含地形数据
+  input_file: "output/bty/terrain.npz"
+  # 输出文件路径，包含生成的关键点对
+  output_file: "output/keypoints/key_points.npz"
+
+uuv:
+  # 我方位置 x 轴最小值
+  x_min: 1000
+  # 我方位置 x 轴最大值
+  x_max: 9000
+  # 我方位置 y 轴最小值
+  y_min: 1000
+  # 我方位置 y 轴最大值
+  y_max: 9000
+  # 我方位置 z 轴最小值
+  z_min: 50
+  # 我方位置 z 轴最大值
+  z_max: 250
+
+enemy:
+  # 敌方 X 轴位置 (固定)
+  x_min: 2000
+  # 敌方位置 y 轴最小值
+  y_min: 1000
+  # 敌方位置 y 轴最大值
+  y_max: 9000
+  # 敌方 Z 轴位置 (固定)
+  z_min: 150
+
+UUV_step:
+  # X 轴采样步长
+  step_x: 100
+  # Y 轴采样步长
+  step_y: 100
+  # Z 轴采样步长
+  step_z: 50
+
+enemy_step:
+  # Y 轴采样步长
+  step_y: 100
