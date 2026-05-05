@@ -3,6 +3,8 @@ file_config:
   input_file: "output/bty/terrain.npz"
   # 输出文件路径，包含生成的关键点对
   output_file: "output/keypoints/key_points.npz"
+  # 输出文件分割数量（1表示不分割，>1则将数据分割为多个文件）
+  num_output_files: 3
 
 uuv:
   # 我方位置 x 轴最小值

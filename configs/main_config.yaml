@@ -39,10 +39,12 @@ env:
   uuv_z_max: 250
 
   # 我方初始化区域范围
-  uuv_init_x_min: 8000
-  uuv_init_x_max: 9000
-  uuv_init_y_min: 1000
-  uuv_init_y_max: 9000
+  uuv_start_x_min: 8000
+  uuv_start_x_max: 9000
+  uuv_start_y_min: 1000
+  uuv_start_y_max: 9000
+  uuv_start_z_min: 50
+  uuv_start_z_max: 250
 
   # ---------------游戏参数定义-------------------
   # 被动声呐探测方程 SL-TL-(NL-DI) > DT
@@ -67,3 +69,33 @@ env:
   enable_visualization: true
   # 可视化图像输出目录
   visualization_output_dir: output/bty
+
+# =============== 训练器配置 ===============
+trainer:
+  # 检查点保存间隔（每 N 个全局步数保存一次）
+  checkpoint_interval: 1000
+  # 最大训练回合数
+  max_epochs: 100
+  # 每个 epoch 的目标步数
+  steps_per_epoch: 2000
+
+# =============== PPO 算法配置 ===============
+ppo:
+  # 学习率
+  learning_rate: 3e-4
+  # 折扣因子
+  gamma: 0.99
+  # GAE 衰减系数
+  gae_lambda: 0.95
+  # PPO 裁剪系数
+  clip_ratio: 0.2
+  # 价值函数损失权重
+  value_coef: 0.5
+  # 熵损失权重
+  entropy_coef: 0.01
+  # 策略更新 epoch 数
+  epochs: 3
+  # Minibatch 大小
+  minibatch_size: 64
+  # Rollout 缓冲区容量（等于 steps_per_epoch）
+  rollout_steps: 2000

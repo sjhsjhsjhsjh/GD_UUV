@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>C++ TL 三维传播损失可视化面板</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <header>
+    <div class="title-block">
+      <h1>C++ TL 三维传播损失可视化面板</h1>
+      <p>先运行 prepare_data.py 生成 data，再打开本页。左侧选择文本文件，右侧叠加显示地形、TL点云、源点与敌方点位。</p>
+    </div>
+    <div class="toolbar">
+      <label for="fileSelect">输入文件</label>
+      <select id="fileSelect"></select>
+      <button id="reloadBtn" type="button">重新加载</button>
+    </div>
+  </header>
+
+  <main>
+    <aside class="sidebar">
+      <div class="card section">
+        <span class="pill" id="runBadge">等待加载</span>
+        <h2>当前数据</h2>
+        <div class="meta-grid" id="runMeta"></div>
+      </div>
+
+      <div class="card section">
+        <h2>文件列表</h2>
+        <div class="env-list" id="fileList"></div>
+      </div>
+
+      <div class="card section">
+        <h2>当前文件统计</h2>
+        <div class="meta-grid" id="fileMeta"></div>
+      </div>
+
+      <div class="card section">
+        <h2>显示控制</h2>
+        <label class="switch-row">
+          <input type="checkbox" id="toggleTerrain" checked />
+          <span>显示三维地形曲面</span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" id="toggleTl" checked />
+          <span>显示TL曲面</span>
+        </label>
+        <label class="field-row" for="tlCapInput">
+          <span>TL 着色限幅 (dB)</span>
+          <input id="tlCapInput" type="number" min="0" step="1" value="120" />
+        </label>
+        <div class="status" id="statusText">正在初始化...</div>
+      </div>
+    </aside>
+
+    <section class="card plot-card">
+      <div id="plot"></div>
+    </section>
+  </main>
+
+  <script src="./js/main.js"></script>
+</body>
+</html>

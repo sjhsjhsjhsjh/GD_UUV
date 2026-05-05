@@ -1,0 +1,30 @@
+dashboard:
+  # -------------------- data io --------------------
+  terrain_npz_path: output/bty/terrain.npz
+  input_data_dir: output/c++tl_output/
+  output_data_dir: dashboards/c++tl_dashboard/data
+
+  # -------------------- frontend rendering --------------------
+  tl_color_min_db: null
+  tl_color_max_db: null
+  tl_color_cap_db: 120
+
+  # -------------------- initial file --------------------
+  initial_file_index: 0
+
+  # -------------------- camera and scene --------------------
+  camera_position:
+    x: 1.55
+    y: 1.45
+    z: 1.15
+
+  # -------------------- plotly rendering --------------------
+  plotly_config:
+    marker_size: 4.0
+    marker_opacity: 0.78
+    terrain_opacity: 0.42
+    colorscale: Viridis
+
+  # -------------------- debug --------------------
+  verbose_stats: true
+  

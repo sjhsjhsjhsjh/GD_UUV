@@ -1,0 +1,1 @@
+{"generated_by": "prepare_data.py", "files": {"payload": "payload.json", "runtime_config": "config_runtime.json", "meta": "meta.json"}, "file_count": 10, "total_point_count": 4500, "terrain_shape": [101, 101], "global_tl_min_db": 48.80509948730469, "global_tl_max_db": 81.0261001586914}

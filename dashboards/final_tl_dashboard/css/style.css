@@ -1,0 +1,242 @@
+﻿:root {
+  color-scheme: dark;
+  --bg: #07111f;
+  --panel: rgba(10, 23, 41, 0.92);
+  --panel-soft: rgba(13, 29, 50, 0.84);
+  --text: #e5eefb;
+  --muted: #8ea6c6;
+  --accent: #4cc9f0;
+  --accent-2: #ffb347;
+  --border: rgba(118, 155, 200, 0.2);
+  --shadow: 0 28px 80px rgba(0, 0, 0, 0.35);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI Variable', 'Aptos', 'Trebuchet MS', sans-serif;
+  background:
+    radial-gradient(circle at 12% 14%, rgba(76, 201, 240, 0.18), transparent 26%),
+    radial-gradient(circle at 88% 4%, rgba(255, 179, 71, 0.12), transparent 20%),
+    linear-gradient(180deg, #040b15 0%, #07111f 100%);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+header {
+  padding: 22px 26px 0;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.title-block h1 {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: 0.02em;
+}
+
+.title-block p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
+.toolbar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  background: var(--panel-soft);
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+}
+
+select, button {
+  background: #0e2034;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+}
+
+input[type='number'] {
+  background: #0e2034;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  width: 120px;
+}
+
+button {
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(76, 201, 240, 0.55);
+}
+
+main {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 18px;
+  padding: 18px 26px 26px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.sidebar {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.section {
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.section:last-child { border-bottom: none; }
+
+.section h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.meta-item {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.meta-label {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.meta-value {
+  font-size: 14px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.env-list {
+  display: grid;
+  gap: 8px;
+  max-height: 35vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.env-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.env-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(76, 201, 240, 0.45);
+}
+
+.env-item.active {
+  border-color: rgba(76, 201, 240, 0.9);
+  background: rgba(76, 201, 240, 0.11);
+}
+
+.env-name { font-weight: 600; }
+
+.env-detail {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+#plot {
+  min-height: calc(100vh - 140px);
+  height: 100%;
+  width: 100%;
+}
+
+.plot-card { min-height: 760px; }
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(76, 201, 240, 0.12);
+  color: #cbefff;
+  border: 1px solid rgba(76, 201, 240, 0.22);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.depth-filters {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.depth-filters legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+@media (max-width: 1080px) {
+  main { grid-template-columns: 1fr; }
+  #plot { min-height: 66vh; }
+}

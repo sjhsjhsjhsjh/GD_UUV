@@ -14,7 +14,7 @@ import numpy as np
 from scipy.interpolate import RectBivariateSpline
 from pathlib import Path
 from typing import Tuple, Optional
-from utils.rich_print import print_info, print_warn, print_error
+from rich_print import print_info, print_warn, print_error
 
 
 class BathymetryMap:

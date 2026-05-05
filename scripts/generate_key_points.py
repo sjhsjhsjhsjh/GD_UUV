@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 关键点对生成脚本（独立一键运行）
-
+[enemy_y, uuv_x, uuv_y, uuv_z]
 功能概述：
 1. 读取 configs/generate_key_points.yaml 配置。
 2. 读取地形文件 output/bty/terrain.npz。
@@ -280,37 +280,69 @@ def build_key_pairs(enemy_points: np.ndarray, uuv_points: np.ndarray) -> np.ndar
     return key_pairs
 
 
-def save_key_points(output_file: Path, key_pairs: np.ndarray, enemy_x: int, enemy_z: int) -> None:
+def save_key_points(output_file: Path, key_pairs: np.ndarray, enemy_x: int, enemy_z: int, num_output_files: int = 1) -> None:
     """
-    保存合法关键点对到 npz。
+    保存合法关键点对到 npz（支持分割保存）。
 
     输入参数：
         output_file: Path
-            输出 npz 文件路径。
+            输出 npz 文件路径（若分割则作为基础路径）。
         key_pairs: np.ndarray
             点对数组，列顺序 [enemy_y, uuv_x, uuv_y, uuv_z]。
         enemy_x: int
             敌方固定 x 坐标（米）。
         enemy_z: int
             敌方固定 z 坐标（米）。
+        num_output_files: int
+            输出文件数量，默认为1（不分割）。若>1则分割保存。
 
     输出参数：
         None
 
     功能说明：
-        将筛选后的合法点对持久化到 npz，同时写入列名和 enemy 固定坐标，便于下游读取。
+        将筛选后的合法点对持久化到 npz。若 num_output_files=1，保存为单个文件；
+        若 num_output_files>1，按行数均匀分割 key_pairs 并保存为多个编号文件。
+        每个文件都包含完整的元数据（enemy_x、enemy_z、key_pair_columns）。
 
     调用示例：
+        >>> # 单文件保存
         >>> save_key_points(Path('output/keypoints/key_points.npz'), key_pairs, 2000, 150)
+        >>> # 分割保存为3个文件
+        >>> save_key_points(Path('output/keypoints/key_points.npz'), key_pairs, 2000, 150, num_output_files=3)
     """
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        output_file,
-        key_pairs=key_pairs,
-        key_pair_columns=np.array(["enemy_y", "uuv_x", "uuv_y", "uuv_z"]),
-        enemy_x=np.int32(enemy_x),
-        enemy_z=np.int32(enemy_z),
-    )
+    key_pair_columns = np.array(["enemy_y", "uuv_x", "uuv_y", "uuv_z"])
+    enemy_x_int32 = np.int32(enemy_x)
+    enemy_z_int32 = np.int32(enemy_z)
+
+    # 单文件保存（num_output_files=1）
+    if num_output_files == 1:
+        np.savez(
+            output_file,
+            key_pairs=key_pairs,
+            key_pair_columns=key_pair_columns,
+            enemy_x=enemy_x_int32,
+            enemy_z=enemy_z_int32,
+        )
+    else:
+        # 多文件分割保存
+        key_pairs_chunks = np.array_split(key_pairs, num_output_files)
+        stem = output_file.stem
+        suffix = output_file.suffix
+        parent_dir = output_file.parent
+
+        for idx_value, chunk in enumerate(key_pairs_chunks):
+            file_index = idx_value + 1
+            indexed_filename = f"{stem}_{file_index:03d}{suffix}"
+            indexed_path = parent_dir / indexed_filename
+
+            np.savez(
+                indexed_path,
+                key_pairs=chunk,
+                key_pair_columns=key_pair_columns,
+                enemy_x=enemy_x_int32,
+                enemy_z=enemy_z_int32,
+            )
 
 
 def main() -> int:
@@ -341,6 +373,7 @@ def main() -> int:
 
     input_file = project_root / str(cfg["file_config"]["input_file"])
     output_file = project_root / str(cfg["file_config"]["output_file"])
+    num_output_files = int(cfg["file_config"].get("num_output_files", 1))
 
     sampling_x_step = int(main_cfg["env"]["sampling_x_step"])
     sampling_y_step = int(main_cfg["env"]["sampling_y_step"])
@@ -388,7 +421,7 @@ def main() -> int:
 
     enemy_x_value = int(cfg["enemy"]["x_min"])
     enemy_z_value = int(cfg["enemy"]["z_min"])
-    save_key_points(output_file, key_pairs, enemy_x_value, enemy_z_value)
+    save_key_points(output_file, key_pairs, enemy_x_value, enemy_z_value, num_output_files)
 
     cost_seconds = time.perf_counter() - start_time
     print_info("=" * 64)
@@ -399,7 +432,11 @@ def main() -> int:
     print_info(f"enemy 固定坐标: x={enemy_x_value}, z={enemy_z_value}")
     print_info(f"enemy 候选/合法: {enemy_points.shape[0]} / {valid_enemy_points.shape[0]}")
     print_info(f"uuv 候选/合法: {uuv_points.shape[0]} / {valid_uuv_points.shape[0]}")
-    print_info(f"输出文件: {output_file}")
+    print_info(f"输出文件数量: {num_output_files}")
+    if num_output_files > 1:
+        rows_per_file = valid_pair_count // num_output_files
+        print_info(f"每文件行数: ~{rows_per_file}（最后一个可能不同）")
+    print_info(f"输出路径: {output_file}")
     print_info(f"耗时: {cost_seconds:.3f} 秒")
     print_info("=" * 64)
 

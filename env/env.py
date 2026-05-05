@@ -68,21 +68,36 @@ class Env:
     def reset(self):
         """重置环境，初始化机器人位置和状态"""
 
-        # 随机生成我方机器人初始位置，确保在可通行区域
+        # 从配置中获取米数单位的范围，转换为网格索引
+        # 采样步长: X/Y=100米, Z=50米
+        uuv_start_x_min_idx = int(self.cfg.env.uuv_start_x_min // 100)
+        uuv_start_x_max_idx = int(self.cfg.env.uuv_start_x_max // 100)
+        uuv_start_y_min_idx = int(self.cfg.env.uuv_start_y_min // 100)
+        uuv_start_y_max_idx = int(self.cfg.env.uuv_start_y_max // 100)
+        uuv_start_z_min_idx = int(self.cfg.env.uuv_start_z_min // 50)
+        uuv_start_z_max_idx = int(self.cfg.env.uuv_start_z_max // 50)
+
+        # 随机生成我方机器人初始位置，确保在可通行区域（使用网格索引）
         while True:
-            temp_UUV_x = random.randint(self.cfg.env.uuv_start_x_min, self.cfg.env.uuv_start_x_max)
-            temp_UUV_y = random.randint(self.cfg.env.uuv_start_y_min, self.cfg.env.uuv_start_y_max)
-            temp_UUV_z = random.randint(self.cfg.env.uuv_start_z_min, self.cfg.env.uuv_start_z_max)
+            temp_UUV_x = random.randint(uuv_start_x_min_idx, uuv_start_x_max_idx)
+            temp_UUV_y = random.randint(uuv_start_y_min_idx, uuv_start_y_max_idx)
+            temp_UUV_z = random.randint(uuv_start_z_min_idx, uuv_start_z_max_idx)
 
             if (self.terrain_3d[temp_UUV_y, temp_UUV_x, temp_UUV_z] == False):
                 break
         self.uuv = Robot(temp_UUV_x, temp_UUV_y, temp_UUV_z)
 
-        # 随机生成敌方机器人初始位置，确保在可通行区域
+        # 敌方位置也需要转换为网格索引
+        enemy_x_idx = int(self.cfg.env.enemy_x // 100)
+        enemy_z_idx = int(self.cfg.env.enemy_z // 50)
+        enemy_y_min_idx = int(self.cfg.env.enemy_y_min // 100)
+        enemy_y_max_idx = int(self.cfg.env.enemy_y_max // 100)
+
+        # 随机生成敌方机器人初始位置，确保在可通行区域（使用网格索引）
         while True:
-            temp_enemy_x = self.cfg.env.enemy_x
-            temp_enemy_y = random.randint(self.cfg.env.enemy_y_min, self.cfg.env.enemy_y_max)
-            temp_enemy_z = self.cfg.env.enemy_z
+            temp_enemy_x = enemy_x_idx
+            temp_enemy_y = random.randint(enemy_y_min_idx, enemy_y_max_idx)
+            temp_enemy_z = enemy_z_idx
 
             if (self.terrain_3d[temp_enemy_y, temp_enemy_x, temp_enemy_z] == False):
                 break
@@ -203,3 +218,111 @@ class Env:
     #         self.enemy.y += random.choice([-1, 0, 1])
     #         if (self.enemy.y >= self.cfg.env.enemy_y_min and self.enemy.y <= self.cfg.env.enemy_y_max and self.terrain_3d[self.enemy.y, self.enemy.x, self.enemy.z] == False):
     #             break
+
+    def get_observation_tensor(self, device: str = "cuda", window_size: int = 16):
+        """为 ACNet 生成观测张量（spatial_input 与 state_vector）。
+
+        功能说明:
+            生成 ACNet 所需的两路输入张量，所有计算直接在 GPU 执行：
+            1. spatial_input: (1, 2, D, H, W) 的 float32 张量
+               - 通道0: 传播损失 TL 热力图（围绕 UUV 的局部窗口）
+               - 通道1: 地形可通行性（True=不可通行, False=可通行，1=True, 0=False）
+            2. state_vector: (1, 6) 的 float32 张量
+               - (x_uuv, y_uuv, z_uuv, x_enemy, y_enemy, z_enemy) 的绝对坐标
+            
+            坐标约定: 地形索引为 terrain_3d[y, x, z]，向量存储为 (x, y, z)。
+            张量设备: 所有张量直接在指定设备（默认 cuda）上创建。
+
+        输入参数:
+            device (str): 计算设备，默认为 "cuda"。
+            window_size (int): spatial 窗口半径（单位：网格单元数），默认为 16。
+                最终 spatial_input 形状为 (1, 2, window_size, window_size, window_size)。
+
+        输出参数:
+            Tuple[torch.Tensor, torch.Tensor]:
+                spatial_input: 形状 (1, 2, window_size, window_size, window_size)，dtype=float32，device=指定设备。
+                state_vector: 形状 (1, 6)，dtype=float32，device=指定设备。
+
+        调用示例:
+            >>> spatial_input, state_vector = env.get_observation_tensor(device="cuda", window_size=16)
+            >>> spatial_input.shape, state_vector.shape
+            (torch.Size([1, 2, 16, 16, 16]), torch.Size([1, 6]))
+        """
+        import torch
+
+        if self.uuv is None or self.enemy is None:
+            raise RuntimeError("环境尚未重置。请先调用 reset() 再获取观测张量。")
+
+        # --- 构建 spatial_input ---
+        # 初始化两通道的 spatial 特征数组（CPU numpy，后续转 GPU torch）
+        spatial_array = np.zeros((2, window_size, window_size, window_size), dtype=np.float32)
+
+        # 计算窗口中心（UUV 位置）与边界范围
+        center_x, center_y, center_z = self.uuv.x, self.uuv.y, self.uuv.z
+        z_min = max(0, center_z - window_size // 2)
+        z_max = min(self.map_depth, center_z + window_size // 2)
+        y_min = max(0, center_y - window_size // 2)
+        y_max = min(self.map_height, center_y + window_size // 2)
+        x_min = max(0, center_x - window_size // 2)
+        x_max = min(self.map_width, center_x + window_size // 2)
+
+        # 窗口在 spatial_array 内的起始偏移
+        z_offset = window_size // 2 - (center_z - z_min)
+        y_offset = window_size // 2 - (center_y - y_min)
+        x_offset = window_size // 2 - (center_x - x_min)
+
+        # 通道0: TL 热力图（局部窗口内每个点到敌方的传播损失）
+        for z_idx in range(z_min, z_max):
+            for y_idx in range(y_min, y_max):
+                for x_idx in range(x_min, x_max):
+                    # 计算该点到敌方的距离（以及 TL）
+                    distance = np.sqrt(
+                        (x_idx - self.enemy.x) ** 2
+                        + (y_idx - self.enemy.y) ** 2
+                        + (z_idx - self.enemy.z) ** 2
+                    )
+                    tl_value = 20 * np.log10(distance + 1e-6)
+                    
+                    # 映射到 spatial_array 坐标
+                    sa_z = z_offset + (z_idx - z_min)
+                    sa_y = y_offset + (y_idx - y_min)
+                    sa_x = x_offset + (x_idx - x_min)
+                    
+                    if 0 <= sa_z < window_size and 0 <= sa_y < window_size and 0 <= sa_x < window_size:
+                        spatial_array[0, sa_z, sa_y, sa_x] = tl_value
+
+        # 通道1: 地形可通行性（1=不可通行, 0=可通行）
+        for z_idx in range(z_min, z_max):
+            for y_idx in range(y_min, y_max):
+                for x_idx in range(x_min, x_max):
+                    # 地形索引约定: terrain_3d[y, x, z]
+                    passable = 1.0 if self.terrain_3d[y_idx, x_idx, z_idx] else 0.0
+                    
+                    sa_z = z_offset + (z_idx - z_min)
+                    sa_y = y_offset + (y_idx - y_min)
+                    sa_x = x_offset + (x_idx - x_min)
+                    
+                    if 0 <= sa_z < window_size and 0 <= sa_y < window_size and 0 <= sa_x < window_size:
+                        spatial_array[1, sa_z, sa_y, sa_x] = passable
+
+        # 转换为 PyTorch 张量，并移至目标设备
+        spatial_input = torch.from_numpy(spatial_array).unsqueeze(0).to(device)  # (1, 2, D, H, W)
+
+        # --- 构建 state_vector ---
+        # 状态向量: (x_uuv, y_uuv, z_uuv, x_enemy, y_enemy, z_enemy)
+        state_vector_np = np.array(
+            [
+                [
+                    float(self.uuv.x),
+                    float(self.uuv.y),
+                    float(self.uuv.z),
+                    float(self.enemy.x),
+                    float(self.enemy.y),
+                    float(self.enemy.z),
+                ]
+            ],
+            dtype=np.float32,
+        )
+        state_vector = torch.from_numpy(state_vector_np).to(device)  # (1, 6)
+
+        return spatial_input, state_vector

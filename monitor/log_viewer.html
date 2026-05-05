@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Run Log Viewer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #09111d;
+      --panel: rgba(13, 22, 34, 0.92);
+      --panel-soft: rgba(17, 29, 45, 0.85);
+      --text: #eef4fb;
+      --muted: #8ea2ba;
+      --accent: #7bdff2;
+      --border: rgba(140, 170, 205, 0.2);
+      --shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
+      --ok: #7ee081;
+      --warn: #ffcb6b;
+      --err: #ff7b7b;
+      --dbg: #77b7ff;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% 10%, rgba(123, 223, 242, 0.14), transparent 24%),
+        radial-gradient(circle at 90% 0%, rgba(255, 203, 107, 0.12), transparent 18%),
+        linear-gradient(180deg, #050b14 0%, #09111d 100%);
+      font-family: "Segoe UI Variable", "Aptos", "Trebuchet MS", sans-serif;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 24px 26px 0;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: 0.02em;
+    }
+
+    .subtitle {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+      padding: 12px;
+      border-radius: 16px;
+      background: var(--panel-soft);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+    }
+
+    select, button {
+      appearance: none;
+      background: #102034;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: inherit;
+    }
+
+    button { cursor: pointer; }
+    button:hover { border-color: rgba(123, 223, 242, 0.55); }
+
+    main {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 18px;
+      padding: 18px 26px 26px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    .section {
+      padding: 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .section:last-child { border-bottom: none; }
+
+    .section h2 {
+      margin: 0 0 12px;
+      font-size: 16px;
+    }
+
+    .meta-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .meta-item {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .meta-label { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .meta-value { word-break: break-word; line-height: 1.4; }
+
+    .status-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(123, 223, 242, 0.22);
+      background: rgba(123, 223, 242, 0.12);
+      color: #d2f4ff;
+      font-size: 12px;
+    }
+
+    .log-card {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 0;
+    }
+
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 16px 16px 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      align-items: center;
+    }
+
+    .log-summary {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .count-pill {
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .log-list {
+      margin: 0;
+      padding: 8px 0 16px;
+      list-style: none;
+      overflow: auto;
+      height: 100%;
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .log-entry {
+      display: grid;
+      grid-template-columns: 84px 80px 1fr;
+      gap: 10px;
+      padding: 8px 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .log-entry:hover { background: rgba(255, 255, 255, 0.03); }
+    .time { color: var(--muted); }
+    .level { font-weight: 700; }
+    .level-info { color: var(--dbg); }
+    .level-debug { color: var(--dbg); }
+    .level-warn { color: var(--warn); }
+    .level-error { color: var(--err); }
+    .level-log { color: var(--ok); }
+    .message { color: var(--text); }
+
+    .empty {
+      padding: 24px 16px;
+      color: var(--muted);
+    }
+
+    @media (max-width: 1100px) {
+      main { grid-template-columns: 1fr; }
+      .log-card { min-height: 0; }
+      .log-entry { grid-template-columns: 74px 72px 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Run Log Viewer</h1>
+      <p class="subtitle">直接读取最新一次 Hydra 运行目录中的 run.log，支持按日志级别筛选并自动刷新。</p>
+    </div>
+    <div class="toolbar">
+      <label for="levelSelect">级别</label>
+      <select id="levelSelect">
+        <option value="ALL">全部</option>
+        <option value="INFO">INFO</option>
+        <option value="WARN">WARN</option>
+        <option value="ERROR">ERROR</option>
+        <option value="DEBUG">DEBUG</option>
+        <option value="LOG">LOG</option>
+      </select>
+      <button id="refreshBtn">刷新</button>
+      <button id="pauseBtn">暂停自动刷新</button>
+      <button id="lockBtn">滚动锁定：开</button>
+    </div>
+  </header>
+
+  <main>
+    <aside class="card">
+      <div class="section">
+        <span class="pill" id="statusPill">等待加载</span>
+        <div class="status-line" id="statusLine"></div>
+      </div>
+      <div class="section">
+        <h2>运行目录</h2>
+        <div class="meta-grid" id="metaGrid"></div>
+      </div>
+      <div class="section">
+        <h2>级别统计</h2>
+        <div class="meta-grid" id="countGrid"></div>
+      </div>
+    </aside>
+
+    <section class="card log-card">
+      <div class="log-header">
+        <div>
+          <h2 style="margin:0;">日志内容</h2>
+          <div class="log-summary" id="logSummary"></div>
+        </div>
+      </div>
+      <ul class="log-list" id="logList"></ul>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      runMeta: null,
+      entries: [],
+      timer: null,
+      autoRefresh: true,
+      scrollLock: true,
+    };
+
+    const levelSelect = document.getElementById('levelSelect');
+    const refreshBtn = document.getElementById('refreshBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const lockBtn = document.getElementById('lockBtn');
+    const statusPill = document.getElementById('statusPill');
+    const statusLine = document.getElementById('statusLine');
+    const metaGrid = document.getElementById('metaGrid');
+    const countGrid = document.getElementById('countGrid');
+    const logList = document.getElementById('logList');
+    const logSummary = document.getElementById('logSummary');
+
+    levelSelect.addEventListener('change', renderLogs);
+    refreshBtn.addEventListener('click', refreshAll);
+    pauseBtn.addEventListener('click', toggleAutoRefresh);
+    lockBtn.addEventListener('click', toggleScrollLock);
+    logList.addEventListener('scroll', syncScrollLockByPosition);
+
+    refreshAll();
+    state.timer = setInterval(() => {
+      if (state.autoRefresh) {
+        refreshAll(false);
+      }
+    }, 2500);
+
+    async function refreshAll(forceStatus = true) {
+      try {
+        if (forceStatus) {
+          statusPill.textContent = '加载中...';
+        }
+        const runMeta = await loadLatestRunMeta();
+        state.runMeta = runMeta;
+        const logText = await loadRunLog(runMeta.run_log);
+        state.entries = parseLog(logText);
+        renderMeta();
+        renderLogs();
+        statusPill.textContent = '已加载';
+        statusLine.textContent = `最后刷新：${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        statusPill.textContent = '加载失败';
+        statusLine.textContent = String(error.message || error);
+        renderMissing();
+      }
+    }
+
+    async function loadLatestRunMeta() {
+      return await fetchJsonWithFallback([
+        '../outputs/latest_run.json',
+        './outputs/latest_run.json',
+        '/outputs/latest_run.json',
+        'outputs/latest_run.json',
+      ]);
+    }
+
+    async function loadRunLog(relativePath) {
+      if (!relativePath) {
+        throw new Error('latest_run.json 中缺少 run_log 字段。');
+      }
+      return await fetchTextWithFallback(relativePath, [
+        '../' + relativePath,
+        './' + relativePath,
+        '/' + relativePath,
+        relativePath,
+      ]);
+    }
+
+    async function fetchJsonWithFallback(urls) {
+      const errorMessages = [];
+      for (const url of urls) {
+        try {
+          const response = await fetch(url + '?t=' + Date.now(), { cache: 'no-store' });
+          if (response.ok) {
+            return await response.json();
+          }
+          errorMessages.push(`${url} -> ${response.status}`);
+        } catch (error) {
+          errorMessages.push(`${url} -> ${error.message || error}`);
+        }
+      }
+      throw new Error(`找不到 latest_run.json，尝试路径失败：${errorMessages.join('；')}`);
+    }
+
+    async function fetchTextWithFallback(resourceLabel, urls) {
+      const errorMessages = [];
+      for (const url of urls) {
+        try {
+          const response = await fetch(url + '?t=' + Date.now(), { cache: 'no-store' });
+          if (response.ok) {
+            return await response.text();
+          }
+          errorMessages.push(`${url} -> ${response.status}`);
+        } catch (error) {
+          errorMessages.push(`${url} -> ${error.message || error}`);
+        }
+      }
+      throw new Error(`无法读取日志文件：${resourceLabel}。尝试路径失败：${errorMessages.join('；')}`);
+    }
+
+    function parseLog(text) {
+      const lines = text.split(/\r?\n/);
+      const entries = [];
+      const pattern = /^\[(?<time>[^\]]+)\]\s+\[(?<level>[^\]]+)\]:\s*(?<message>.*)$/;
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const match = line.match(pattern);
+        if (match && match.groups) {
+          entries.push({
+            time: match.groups.time,
+            level: match.groups.level.toUpperCase(),
+            message: match.groups.message,
+            raw: line,
+          });
+        } else {
+          entries.push({ time: '--:--:--', level: 'LOG', message: line, raw: line });
+        }
+      }
+      entries.reverse();
+      return entries;
+    }
+
+    function renderMeta() {
+      const meta = state.runMeta || {};
+      metaGrid.innerHTML = '';
+      countGrid.innerHTML = '';
+
+      addMetaItem(metaGrid, 'Hydra 运行目录', meta.run_dir || '未知');
+      addMetaItem(metaGrid, '日志文件', meta.run_log || 'run.log');
+
+      const counts = countLevels(state.entries);
+      const orderedLevels = ['INFO', 'WARN', 'ERROR', 'DEBUG', 'LOG'];
+      for (const level of orderedLevels) {
+        addMetaItem(countGrid, level, String(counts[level] || 0));
+      }
+
+      const filtered = filterEntries();
+      logSummary.innerHTML = `
+        <span class="count-pill">总条数 ${state.entries.length}</span>
+        <span class="count-pill">当前显示 ${filtered.length}</span>
+        <span class="count-pill">自动刷新 ${state.autoRefresh ? '开启' : '暂停'}</span>
+        <span class="count-pill">滚动锁定 ${state.scrollLock ? '开启' : '关闭'}</span>
+      `;
+    }
+
+    function addMetaItem(container, label, value) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'meta-item';
+      wrapper.innerHTML = `<div class="meta-label">${escapeHtml(label)}</div><div class="meta-value">${escapeHtml(value)}</div>`;
+      container.appendChild(wrapper);
+    }
+
+    function renderLogs() {
+      const previous_scroll_top = logList.scrollTop;
+      const filtered = filterEntries();
+      logList.innerHTML = '';
+
+      if (!filtered.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.textContent = '没有匹配的日志。';
+        logList.appendChild(empty);
+        renderMeta();
+        if (state.scrollLock) {
+          logList.scrollTop = 0;
+        }
+        return;
+      }
+
+      for (const entry of filtered) {
+        const item = document.createElement('li');
+        item.className = 'log-entry';
+        const levelClass = `level-${entry.level.toLowerCase()}`;
+        item.innerHTML = `
+          <span class="time">${escapeHtml(entry.time)}</span>
+          <span class="level ${levelClass}">${escapeHtml(entry.level)}</span>
+          <span class="message">${escapeHtml(entry.message)}</span>
+        `;
+        logList.appendChild(item);
+      }
+
+      if (state.scrollLock) {
+        logList.scrollTop = 0;
+      } else {
+        logList.scrollTop = previous_scroll_top;
+      }
+
+      renderMeta();
+    }
+
+    function renderMissing() {
+      metaGrid.innerHTML = '';
+      countGrid.innerHTML = '';
+      logList.innerHTML = '';
+      logSummary.innerHTML = '';
+      addMetaItem(metaGrid, '提示', '请先运行 run.py 生成 outputs/latest_run.json 和 run.log。');
+      addMetaItem(metaGrid, '查看方式', '使用 Live Server 打开本页面即可。');
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = '等待最新运行日志。';
+      logList.appendChild(empty);
+    }
+
+    function filterEntries() {
+      const level = levelSelect.value;
+      if (level === 'ALL') {
+        return state.entries;
+      }
+      return state.entries.filter((entry) => entry.level === level);
+    }
+
+    function countLevels(entries) {
+      return entries.reduce((acc, entry) => {
+        acc[entry.level] = (acc[entry.level] || 0) + 1;
+        return acc;
+      }, {});
+    }
+
+    function toggleAutoRefresh() {
+      state.autoRefresh = !state.autoRefresh;
+      pauseBtn.textContent = state.autoRefresh ? '暂停自动刷新' : '恢复自动刷新';
+      renderMeta();
+    }
+
+    function toggleScrollLock() {
+      state.scrollLock = !state.scrollLock;
+      lockBtn.textContent = state.scrollLock ? '滚动锁定：开' : '滚动锁定：关';
+      if (state.scrollLock) {
+        logList.scrollTop = 0;
+      }
+      renderMeta();
+    }
+
+    function syncScrollLockByPosition() {
+      const is_near_top = logList.scrollTop <= 8;
+      if (is_near_top !== state.scrollLock) {
+        state.scrollLock = is_near_top;
+        lockBtn.textContent = state.scrollLock ? '滚动锁定：开' : '滚动锁定：关';
+        renderMeta();
+      }
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+  </script>
+</body>
+</html>

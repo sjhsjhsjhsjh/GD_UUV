@@ -1,0 +1,1 @@
+{"generated_by": "prepare_data.py", "files": {"payload": "payload.json", "runtime_config": "config_runtime.json"}, "axes_lengths": {"our_x": 81, "our_y": 81, "our_z": 5, "enemy_y": 81, "enemy_z": 1}, "sampled_points": 32805, "enemy_positions": 81, "initial_slice_stats": {"valid_count": 29560, "tl_min_db": 46.60749816894531, "tl_max_db": 120.0, "tl_mean_db": 68.88911437988281}}
