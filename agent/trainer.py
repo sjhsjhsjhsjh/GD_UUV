@@ -8,12 +8,13 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import numpy as np
 from omegaconf import DictConfig
 
 from agent.acnet import ACNet
 from buffer.rollout_buffer import RolloutBuffer
-from utils.rich_print import print_info, print_warn, print_error
+from utils.rich_print import print_info, print_warn, print_error, print_success
 
 
 class PPOTrainer:
@@ -33,7 +34,7 @@ class PPOTrainer:
         ...           f"loss={update_info['policy_loss']:.4f}")
     """
 
-    def __init__(self, cfg: DictConfig, device: str = "cuda"):
+    def __init__(self, cfg: DictConfig, device: str = "cuda", env=None):
         """初始化 PPO 训练器。
 
         功能说明:
@@ -43,33 +44,57 @@ class PPOTrainer:
         输入参数:
             cfg (DictConfig): Hydra 配置对象，包含 trainer 与 ppo 配置段。
             device (str): 计算设备，默认为 "cuda"。
+            env: 环境对象，用于 RolloutBuffer 动态重构 spatial_input。
 
         输出参数:
             无。
 
         调用示例:
-            >>> trainer = PPOTrainer(cfg, device="cuda")
+            >>> trainer = PPOTrainer(cfg, device="cuda", env=env)
         """
         self.cfg = cfg
         self.device = device
+        self.env = env
 
         # --- 初始化 ACNet 网络 ---
         self.model = ACNet(device=device).to(device)
         print_info(f"ACNet 初始化完成，设备: {device}")
 
-        # --- 初始化优化器 ---
+        # --- 初始化优化器（添加权重衰减 L2 正则化）---
         self.optimizer = optim.Adam(
             self.model.parameters(),
             lr=cfg.ppo.learning_rate,
+            weight_decay=1e-4,
         )
-        print_info(f"优化器初始化完成，学习率: {cfg.ppo.learning_rate}")
+        print_info(f"优化器初始化完成，学习率: {cfg.ppo.learning_rate}，权重衰减: 1e-4")
 
-        # --- 初始化 RolloutBuffer ---
+        # --- 初始化 RolloutBuffer（传入 env 用于动态重构 spatial_input）---
         self.buffer = RolloutBuffer(
             capacity=cfg.ppo.rollout_steps,
             device=device,
+            env=env,
         )
-        print_info(f"RolloutBuffer 初始化完成，容量: {cfg.ppo.rollout_steps}")
+        print_info(f"RolloutBuffer 初始化完成，容量: {cfg.ppo.rollout_steps}，spatial_input 动态重构已启用")
+
+        # --- 初始化学习率调度器（线性预热 + 余弦衰减）---
+        max_epochs = cfg.trainer.max_epochs
+        warmup_steps = max(1, cfg.ppo.rollout_steps // 10)  # 前 10% 的 rollout steps 进行预热
+        self._warmup_scheduler = LinearLR(
+            self.optimizer,
+            start_factor=0.1,
+            total_iters=warmup_steps,
+        )
+        self._cosine_scheduler = CosineAnnealingLR(
+            self.optimizer,
+            T_max=max_epochs,
+            eta_min=1e-6,
+        )
+        self.scheduler = SequentialLR(
+            self.optimizer,
+            schedulers=[self._warmup_scheduler, self._cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+        print_info(f"LR调度器初始化完成：预热步数={warmup_steps}，最大epoch={max_epochs}")
 
         # --- PPO 超参数 ---
         self.gamma = cfg.ppo.gamma
@@ -84,6 +109,7 @@ class PPOTrainer:
         # --- 训练状态 ---
         self.global_step = 0
         self.episode = 0
+        self.current_epoch = 0
 
     def collect_rollout(
         self, env: Any, num_steps: int, max_episode_steps: int = 10000
@@ -127,6 +153,7 @@ class PPOTrainer:
             while step_count < num_steps:
                 # 获取当前观测
                 spatial_input, state_vector = env.get_observation_tensor(device=self.device)
+                assert state_vector.shape == (1, 7), f"状态向量维度错误，期望 (1, 7)，实际 {state_vector.shape}"
 
                 # 前向传播，获取动作 logits 与价值估计
                 actor_logits, value = self.model(spatial_input, state_vector)
@@ -168,10 +195,17 @@ class PPOTrainer:
                         _, next_value = self.model(next_spatial, next_state_vec)
                         next_value = next_value.item()
 
-                    print_info(
-                        f"Episode {num_episodes} 结束: 奖励={episode_reward:.2f}, "
-                        f"步数={episode_length}, 理由={info.get('result', 'max_steps')}"
-                    )
+                    # 对于成功到达终点的情况，日志使用 print_success 打印
+                    if "胜利" in info.get('result', ''):
+                        print_success(
+                            f"Episode {num_episodes} 结束: 奖励={episode_reward:.2f}, "
+                            f"步数={episode_length}, 理由={info.get('result', 'max_steps')}"
+                        )
+                    else:
+                        print_info(
+                            f"Episode {num_episodes} 结束: 奖励={episode_reward:.2f}, "
+                            f"步数={episode_length}, 理由={info.get('result', 'max_steps')}"
+                        )
 
                     num_episodes += 1
                     total_reward += episode_reward
@@ -196,11 +230,16 @@ class PPOTrainer:
         )
 
         self.episode += num_episodes
+        
+        # 获取当前学习率用于日志
+        current_lr = self.optimizer.param_groups[0]['lr']
+        
         return {
             "reward_mean": reward_mean,
             "episode_rewards": total_reward,
             "episode_length": episode_length,
             "num_episodes": num_episodes,
+            "current_lr": current_lr,
         }
 
     def update_policy(self) -> Dict[str, float]:
@@ -294,11 +333,18 @@ class PPOTrainer:
             f"熵={avg_entropy:.4f}, 总损失={avg_total_loss:.4f}"
         )
 
+        # 更新学习率调度器
+        self.scheduler.step()
+        self.current_epoch += 1
+        current_lr = self.optimizer.param_groups[0]['lr']
+        print_info(f"Epoch {self.current_epoch} LR调度完成，当前学习率: {current_lr:.6f}")
+
         return {
             "policy_loss": avg_policy_loss,
             "value_loss": avg_value_loss,
             "entropy": avg_entropy,
             "total_loss": avg_total_loss,
+            "current_lr": current_lr,
         }
 
     def save_checkpoint(self, checkpoint_dir: Path) -> None:

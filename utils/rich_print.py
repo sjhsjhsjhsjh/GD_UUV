@@ -1,6 +1,8 @@
 from rich.console import Console
 from rich.text import Text
 from datetime import datetime
+import sys
+import os
 
 LEVELS = ["LOG", "WARN", "ERROR", "DEBUG", "INFO"]
 LEVEL_COLORS = {
@@ -15,7 +17,7 @@ LEVEL_COLORS = {
 
 MAX_PREFIX_LEN = max(len(f"[{l}]:") for l in LEVELS)
 
-# 全局console对象
+# 全局console对象 - 使用标准输出
 _console = Console()
 
 
@@ -55,13 +57,13 @@ def print_info(message: str, end: str = "\n"):
     time_str = datetime.now().strftime("%H:%M:%S")
     prefix = "[INFO]:"
     spaces = " " * (MAX_PREFIX_LEN - len(prefix) + 1)
-    
+
     text = Text()
     text.append(f"[{time_str}] ", style="dim")
     text.append(prefix, style=f"bold {LEVEL_COLORS['INFO']}")
     text.append(spaces)
     text.append(message)
-    
+
     _console.print(text, end=end)
 
 
@@ -78,13 +80,13 @@ def print_warn(message: str, end: str = "\n"):
     time_str = datetime.now().strftime("%H:%M:%S")
     prefix = "[WARN]:"
     spaces = " " * (MAX_PREFIX_LEN - len(prefix) + 1)
-    
+
     text = Text()
     text.append(f"[{time_str}] ", style="dim")
     text.append(prefix, style=f"bold {LEVEL_COLORS['WARN']}")
     text.append(spaces)
     text.append(message)
-    
+
     _console.print(text, end=end)
 
 
@@ -101,13 +103,13 @@ def print_error(message: str, end: str = "\n"):
     time_str = datetime.now().strftime("%H:%M:%S")
     prefix = "[ERROR]:"
     spaces = " " * (MAX_PREFIX_LEN - len(prefix) + 1)
-    
+
     text = Text()
     text.append(f"[{time_str}] ", style="dim")
     text.append(prefix, style=f"bold {LEVEL_COLORS['ERROR']}")
     text.append(spaces)
     text.append(message)
-    
+
     _console.print(text, end=end)
 
 
@@ -147,11 +149,11 @@ def print_success(message: str, end: str = "\n"):
     time_str = datetime.now().strftime("%H:%M:%S")
     prefix = "[SUCC]:"
     spaces = " " * (MAX_PREFIX_LEN - len(prefix) + 1)
-    
+
     text = Text()
     text.append(f"[{time_str}] ", style="dim")
     text.append(prefix, style=f"bold {LEVEL_COLORS['SUCC']}")
     text.append(spaces)
-    text.append(message)
-    
+    text.append(message, style=f"bold {LEVEL_COLORS['SUCC']}")
+
     _console.print(text, end=end)

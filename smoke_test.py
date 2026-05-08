@@ -204,7 +204,9 @@ def test_trainer_initialization() -> bool:
             cfg = compose(config_name="main_config")
         
         device = "cuda"
-        trainer = PPOTrainer(cfg, device=device)
+        from env.env import Env
+        env = Env(cfg)
+        trainer = PPOTrainer(cfg, device=device, env=env)
         print_info("✓ PPOTrainer 初始化成功")
         print_info(f"  - 模型参数数: {sum(p.numel() for p in trainer.model.parameters())}")
         print_info(f"  - 学习率: {cfg.ppo.learning_rate}")
