@@ -1,7 +1,7 @@
 """ACNet (Acoustic Concealment Network) 决策网络。
 
 该文件提供用于 UUV 隐蔽突防任务的 Actor-Critic 网络实现，
-网络同时接收 3D 空间输入与 6 维状态向量输入。
+网络同时接收 3D 空间输入与可配置维度的状态向量输入。
 """
 
 from __future__ import annotations
@@ -158,13 +158,13 @@ class ACNet(nn.Module):
     调用示例:
         >>> model = ACNet(device="cuda").to("cuda")
         >>> spatial_input = torch.randn(4, 2, 16, 16, 16, device="cuda")
-        >>> state_vector = torch.randn(4, 7, device="cuda")
+        >>> state_vector = torch.randn(4, 8, device="cuda")
         >>> actor_logits, state_value = model(spatial_input, state_vector)
         >>> actor_logits.shape, state_value.shape
         (torch.Size([4, 6]), torch.Size([4, 1]))
     """
 
-    def __init__(self, device: str = "cuda") -> None:
+    def __init__(self, device: str = "cuda", state_vector_dim: int = 8) -> None:
         """初始化 ACNet 网络结构。
 
         功能说明:
@@ -189,6 +189,8 @@ class ACNet(nn.Module):
             raise ValueError(f"ACNet 仅支持 GPU 推理，指定设备: {device}。请使用 'cuda' 或 'cuda:0' 等。")
 
         self._device = device
+        # 状态向量输入维度（由配置传入）
+        self._state_vector_dim = int(state_vector_dim)
 
         # Spatial Branch 输入: (B, 2, D, H, W)
         # Conv1 + Residual Block 输出: (B, 32, D, H, W)
@@ -212,10 +214,10 @@ class ACNet(nn.Module):
         # GAP 输出: (B, 128, 1, 1, 1) -> 展平后 (B, 128)
         self._spatial_gap = nn.AdaptiveAvgPool3d(output_size=1)
 
-        # Vector Branch 输入: (B, 7)
+        # Vector Branch 输入: (B, N)，N 为可配置的状态向量维度
         # MLP 输出: (B, 64)
         self._vector_mlp = nn.Sequential(
-            nn.Linear(7, 64),
+            nn.Linear(self._state_vector_dim, 64),
             nn.ReLU(inplace=True),
             nn.Dropout(p=0.2),
             nn.Linear(64, 64),
@@ -233,12 +235,20 @@ class ACNet(nn.Module):
         # Critic Head: (B, 256) -> (B, 1)
         self._critic_head = nn.Linear(256, 1)
 
+        # 对 Actor 和 Critic 头应用正交初始化
+        nn.init.orthogonal_(self._actor_head.weight, gain=1)
+        self._actor_head.weight.data.mul_(0.01)
+        nn.init.constant_(self._actor_head.bias, 0.0)
+
+        nn.init.orthogonal_(self._critic_head.weight, gain=1)
+        nn.init.constant_(self._critic_head.bias, 0.0)
+
     def forward(self, spatial_input: torch.Tensor, state_vector: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """执行前向传播并返回策略 logits 与状态价值。
 
         功能说明:
             1. 对 3D 体素输入执行卷积特征提取并做全局平均池化。
-            2. 对 7 维状态向量执行 MLP 编码。
+            2. 对状态向量执行 MLP 编码（维度由配置决定）。
             3. 将两路特征拼接后通过融合层。
             4. 由 Actor/Critic 头分别输出动作 logits 与状态价值。
 
@@ -249,8 +259,9 @@ class ACNet(nn.Module):
                 形状为 (B, 2, D, H, W) 的 3D 输入，必须在 GPU 上。
                 通道 0 表示传播损失 TL 图，通道 1 表示地形可通性数组。
             state_vector (torch.Tensor):
-                形状为 (B, 7) 的状态向量，必须在 GPU 上。
-                包含 (x_uuv, y_uuv, z_uuv, y_enemy, current_tl, gradient_tl, average_tl)。
+                形状为 (B, N) 的状态向量（N 为配置中的 `state_vector_dim`），必须在 GPU 上。
+                前 8 维保持语义顺序 (x_uuv, y_uuv, z_uuv, y_enemy, current_tl, gradient_tl, average_tl, cumulative_acoustic_signal)，
+                若 N > 8，其余维为占位或自定义特征。
 
         输出参数:
             Tuple[torch.Tensor, torch.Tensor]:
@@ -260,7 +271,7 @@ class ACNet(nn.Module):
         调用示例:
             >>> model = ACNet(device="cuda").to("cuda")
             >>> spatial_input = torch.randn(2, 2, 20, 24, 28, device="cuda")
-            >>> state_vector = torch.randn(2, 7, device="cuda")
+            >>> state_vector = torch.randn(2, 8, device="cuda")
             >>> actor_logits, state_value = model(spatial_input, state_vector)
         """
 
@@ -280,9 +291,9 @@ class ACNet(nn.Module):
             raise ValueError(f"spatial_input 必须为 5 维张量 (B, 2, D, H, W)，当前维度: {spatial_input.dim()}")
         if spatial_input.size(1) != 2:
             raise ValueError(f"spatial_input 通道数必须为 2，当前通道数: {spatial_input.size(1)}")
-        if state_vector.dim() != 2 or state_vector.size(1) != 7:
+        if state_vector.dim() != 2 or state_vector.size(1) != self._state_vector_dim:
             raise ValueError(
-                f"state_vector 必须为形状 (B, 7) 的 2 维张量，当前形状: {tuple(state_vector.shape)}"
+                f"state_vector 必须为形状 (B, {self._state_vector_dim}) 的 2 维张量，当前形状: {tuple(state_vector.shape)}"
             )
         if spatial_input.size(0) != state_vector.size(0):
             raise ValueError(
@@ -317,7 +328,7 @@ class ACNet(nn.Module):
         spatial_feature = spatial_feature.flatten(start_dim=1)
 
         # --- 向量分支 ---
-        # (B, 7) -> MLP -> Dropout -> (B, 64)
+        # (B, 8) -> MLP -> Dropout -> (B, 64)
         vector_feature = self._vector_mlp(state_vector)
         vector_feature = self._vector_dropout(vector_feature)
 
@@ -375,7 +386,7 @@ def _run_smoke_test() -> None:
     depth, height, width = 20, 24, 28
 
     spatial_input = torch.randn(batch_size, 2, depth, height, width, device=device)
-    state_vector = torch.randn(batch_size, 7, device=device)
+    state_vector = torch.randn(batch_size, model._state_vector_dim, device=device)
 
     try:
         actor_logits, state_value = model(spatial_input, state_vector)

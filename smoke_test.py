@@ -67,11 +67,12 @@ def test_acnet_initialization() -> bool:
         # 测试前向传播
         batch_size, depth, height, width = 2, 16, 16, 16
         spatial_input = torch.randn(batch_size, 2, depth, height, width, device=device)
-        state_vector = torch.randn(batch_size, 6, device=device)
-        
+        sv_dim = getattr(model, "_state_vector_dim", 8)
+        state_vector = torch.randn(batch_size, sv_dim, device=device)
+
         actor_logits, state_value = model(spatial_input, state_vector)
-        
-        assert actor_logits.shape == (batch_size, 6), f"Actor logits 形状错误: {actor_logits.shape}"
+
+        assert actor_logits.shape == (batch_size, 7), f"Actor logits 形状错误: {actor_logits.shape}"
         assert state_value.shape == (batch_size, 1), f"State value 形状错误: {state_value.shape}"
         assert actor_logits.device.type == "cuda", "Actor logits 不在 GPU 上"
         assert state_value.device.type == "cuda", "State value 不在 GPU 上"
@@ -100,8 +101,9 @@ def test_rollout_buffer() -> bool:
         # 模拟几步轨迹
         for step in range(5):
             spatial_input = torch.randn(1, 2, 16, 16, 16, device=device)
-            state_vector = torch.randn(1, 6, device=device)
-            action = torch.tensor([step % 6], device=device)
+                sv_dim = buffer.state_vector_dim
+                state_vector = torch.randn(1, sv_dim, device=device)
+            action = torch.tensor([step % 7], device=device)
             logprob = torch.tensor(-0.5, device=device)
             reward = float(step) + 1.0
             done = (step == 4)
@@ -168,7 +170,9 @@ def test_env_observation_generation() -> bool:
         spatial_input, state_vector = env.get_observation_tensor(device=device, window_size=16)
         
         assert spatial_input.shape == (1, 2, 16, 16, 16), f"Spatial 形状错误: {spatial_input.shape}"
-        assert state_vector.shape == (1, 6), f"State vector 形状错误: {state_vector.shape}"
+        # env.state_vector_dim 由配置决定
+        expected_sv_dim = getattr(env, "state_vector_dim", 8)
+        assert state_vector.shape == (1, expected_sv_dim), f"State vector 形状错误: {state_vector.shape}"
         assert spatial_input.device.type == "cuda", "Spatial 不在 GPU 上"
         assert state_vector.device.type == "cuda", "State vector 不在 GPU 上"
         

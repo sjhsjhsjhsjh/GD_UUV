@@ -41,7 +41,7 @@ def test_reconstruction_accuracy():
     print_info(f"原始观测形状: {original_spatial.shape}, {state_vector.shape}")
     
     # 创建 batch state_vector（包含当前位置的状态向量）
-    batch_state_vector = state_vector  # (1, 7)
+    batch_state_vector = state_vector
     
     # 调用重构方法
     reconstructed_spatial = buffer._reconstruct_spatial_input_batch(batch_state_vector)
@@ -93,7 +93,7 @@ def test_batch_reconstruction():
         _, state_vector = env.get_observation_tensor(device="cuda")
         batch_state_vectors.append(state_vector.squeeze(0))
     
-    batch_state_vector = torch.stack(batch_state_vectors, dim=0)  # (batch_size, 7)
+    batch_state_vector = torch.stack(batch_state_vectors, dim=0)
     print_info(f"Batch state_vector 形状: {batch_state_vector.shape}")
     
     # 重构 batch spatial_input
@@ -148,7 +148,8 @@ def test_buffer_add_and_iterate():
         cfg = compose(config_name="main_config")
     
     env = Env(cfg)
-    buffer = RolloutBuffer(capacity=200, device="cuda", env=env)
+    # 该测试期望 buffer 在 iterate 时动态重构 spatial_input，因此显式禁用持久化存储
+    buffer = RolloutBuffer(capacity=200, device="cuda", env=env, store_spatial=False)
     
     print_info("向 buffer 添加经验...")
     
@@ -201,7 +202,7 @@ def test_buffer_add_and_iterate():
         assert spatial_input.shape[0] > 0, "spatial_input batch size 为 0"
         assert spatial_input.shape[1:] == (2, env.field_of_view, env.field_of_view, env.field_of_view_on_z), \
             f"spatial_input 形状错误: {spatial_input.shape}"
-        assert state_vector.shape == (batch_sz, 7), f"state_vector 形状错误: {state_vector.shape}"
+        assert state_vector.shape == (batch_sz, buffer.state_vector_dim), f"state_vector 形状错误: {state_vector.shape}"
         assert actions.shape == (batch_sz,), f"actions 形状错误: {actions.shape}"
         
         print_info(f"  Batch {batch_count}: size={batch_sz}, spatial_input 已动态重构")
@@ -232,8 +233,9 @@ def test_memory_savings():
     spatial_size_bytes = capacity * 2 * field_of_view * field_of_view * field_of_view_on_z * 4
     spatial_size_mb = spatial_size_bytes / (1024 * 1024)
     
-    # state_vector 大小：capacity × 7 × 4 bytes
-    state_vector_size_bytes = capacity * 7 * 4
+    # state_vector 大小：capacity × N × 4 bytes（N 为 env.state_vector_dim）
+    sv_dim = getattr(env, "state_vector_dim", 8)
+    state_vector_size_bytes = capacity * sv_dim * 4
     state_vector_size_mb = state_vector_size_bytes / (1024 * 1024)
     
     # 总大小

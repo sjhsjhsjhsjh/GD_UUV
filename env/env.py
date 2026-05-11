@@ -107,12 +107,27 @@ class Env:
         data = np.load(npz_file)
         # 获取3D可通行性布尔数组，True表示山体（不可通行），False表示水/空隙（可通行）
         self.terrain_3d = data['terrain_3d']  # shape: (101, 101, 11), dtype: bool
+        self.terrain_3d = np.transpose(self.terrain_3d, axes=(1, 0, 2))  # 转换为 (x, y, z) 顺序，shape: (101, 101, 11)
         # 转换为 float32，山体=0.0，水/空隙=1.0，适配 Relu 激活函数
         self.terrain_3d = np.logical_not(self.terrain_3d)  # 取反，使得 True（山体）变为 False，False（水/空隙）变为 True
         self.terrain_3d = self.terrain_3d.astype(np.float32)
         # 从现在开始，self.terrain_3d[x, y, z] 的访问方式表示地图坐标 (x, y, z) 处的地形信息，1.0 表示可通行，0.0 表示山体不可通行
+        # 将 配置文件设置的可通行范围外的地形全部设为不可通行
+        x_idx = np.arange(self.terrain_3d.shape[0])[:, None, None]
+        y_idx = np.arange(self.terrain_3d.shape[1])[None, :, None]
+        z_idx = np.arange(self.terrain_3d.shape[2])[None, None, :]
+
+        outside_mask = (
+            (x_idx < self.uuv_x_min_index) | (x_idx > self.uuv_x_max_index) |
+            (y_idx < self.uuv_y_min_index) | (y_idx > self.uuv_y_max_index) |
+            (z_idx < self.uuv_z_min_index) | (z_idx > self.uuv_z_max_index)
+        )
+
+        self.terrain_3d[outside_mask] = 0.0
         # 获取2D海深数组
         self.bathymetry_2d = data['bathymetry_2d']  # shape: (101, 101), dtype: float64
+        self.bathymetry_2d = self.bathymetry_2d.astype(np.float32)
+        self.bathymetry_2d = np.transpose(self.bathymetry_2d, axes=(1, 0))  # 转换为 (x, y) 顺序，shape: (101, 101)
         print_success(f"地形数据加载完成: 3D可通行性数组形状 {self.terrain_3d.shape}, 2D海深数组形状 {self.bathymetry_2d.shape}")
 
         # 加载TL信息文件
@@ -127,10 +142,55 @@ class Env:
         self.tl_table_tensor = from_numpy(np.ascontiguousarray(self.tl_table)).to(device="cuda", dtype=torch.float32)
         # 在GPU上预分配网络观测的数组
         self.net_obervation_spatial_tensor = torch.zeros((2, self.field_of_view, self.field_of_view, self.field_of_view_on_z), dtype=torch.float32, device="cuda")
-        self.net_state_vector_tensor = torch.zeros((1, 7), dtype=torch.float32, device="cuda")
+        # 直接使用配置中的 state_vector 维度（信任配置）并在 GPU 上预分配
+        self.state_vector_dim = int(cfg.ppo.state_vector_dim)
+        print_info(f"当前 state_vector 维度为：{self.state_vector_dim}")
+        self.net_state_vector_tensor = torch.zeros((1, self.state_vector_dim), dtype=torch.float32, device="cuda")
 
-        # 测试：将 TL 数组的五层切片保存为图像，验证坐标对应关系
         self._test_save_tl_slices_as_images()
+        self._test_terrain_slices_as_images()
+
+    def _test_terrain_slices_as_images(self):
+        """测试：保存地形切片图像，验证坐标对应关系"""
+        import matplotlib.pyplot as plt
+        from pathlib import Path
+
+        output_dir = Path("output/terrain_slices")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        p1_x = 79
+        p1_y = 31
+        p1_z = 2
+        print_info("terrain_3d[{}, {}, {}] = {}".format(p1_x, p1_y, p1_z, self.terrain_3d[p1_x, p1_y, p1_z]))
+        p2_x = 87
+        p2_y = 48
+        p2_z = 4
+        print_info("terrain_3d[{}, {}, {}] = {}".format(p2_x, p2_y, p2_z, self.terrain_3d[p2_x, p2_y, p2_z]))
+
+        x = np.arange(self.terrain_3d.shape[0])
+        y = np.arange(self.terrain_3d.shape[1])
+        X, Y = np.meshgrid(x, y, indexing="ij")
+
+        for z in range(self.map_depth):
+            terrain_slice = self.terrain_3d[:, :, z]
+            plt.figure(figsize=(6, 6))
+            plt.pcolormesh(X, Y, self.terrain_3d[:, :, z], shading='auto')
+            plt.xlabel("X Coordinate")
+            plt.ylabel("Y Coordinate")
+            plt.colorbar(label="Passability (1=passable, 0=mountain)")
+            plt.title(f"Terrain Slice at z={z} (Depth {z * self.cfg.env.sampling_z_step}m)")
+            plt.xlabel("X Coordinate (grid index)")
+            plt.ylabel("Y Coordinate (grid index)")
+            # 画出 P1 和 P2 的位置，标记具有一定透明度
+            if z == p1_z:
+                plt.scatter([p1_x], [p1_y], color="red", marker="o", label="P1 (79, 31, 2)", alpha=0.5)
+            if z == p2_z:
+                plt.scatter([p2_x], [p2_y], color="blue", marker="x", label="P2 (87, 48, 4)", alpha=0.5)
+            plt.legend()
+            plt.savefig(output_dir / f"terrain_slice_z{z}.png", bbox_inches="tight", dpi=150)
+            plt.close()
+
+        print_success(f"地形切片图像保存完成: {output_dir.resolve()}")
 
     def _test_save_tl_slices_as_images(self):
         """测试：保存 TL 切片并将地形不可通行区域叠加为半透明红色图层。"""
@@ -143,6 +203,10 @@ class Env:
 
         enemy_y = 50  # 固定敌方 y 坐标，测试不同 z 层的 TL 切片
 
+        x = np.arange(self.terrain_3d.shape[0])
+        y = np.arange(self.terrain_3d.shape[1])
+        X, Y = np.meshgrid(x, y, indexing="ij")
+
         for z in range(1, 6):
             # TL: 索引顺序 [enemy_y, uuv_x, uuv_y, uuv_z]
             tl_slice = self.tl_table[enemy_y, :, :, z].astype(np.float32)
@@ -152,7 +216,7 @@ class Env:
             mountain_mask = (terrain_slice <= 0.5) 
 
             plt.figure(figsize=(6, 6))
-            plt.imshow(tl_slice, origin="lower", cmap="viridis")
+            plt.pcolormesh(X, Y, tl_slice, shading='auto', cmap="viridis")
             plt.colorbar(label="TL (dB)")
             plt.title(f"TL Slice at z={z} (Depth {z * self.cfg.env.sampling_z_step}m)")
             plt.xlabel("X Coordinate (grid index)")
@@ -160,10 +224,8 @@ class Env:
             plt.savefig(output_dir / f"tl_slice_z{z}_plain.png", bbox_inches="tight", dpi=150)
 
             # 叠加不可通行区域：只显示山体部分，半透明绿色
-            masked = np.ma.masked_where(~mountain_mask, mountain_mask)
-            plt.imshow(
-                masked, cmap="Greens", alpha=0.5, origin="lower", interpolation="nearest"
-            )
+            # masked = np.ma.masked_where(~mountain_mask, mountain_mask)
+            # plt.pcolormesh(X, Y, masked, cmap="Greens", alpha=0.5, origin="lower", interpolation="nearest")
 
             plt.title(f"TL Slice at z={z} (Depth {z * self.cfg.env.sampling_z_step}m)")
             plt.xlabel("X Coordinate (grid index)")
@@ -185,6 +247,8 @@ class Env:
             if (self.terrain_3d[temp_UUV_x, temp_UUV_y, temp_UUV_z] > 0.5):
                 break
         self.uuv = Robot(temp_UUV_x, temp_UUV_y, temp_UUV_z)
+        self.last_uuv_location = (self.uuv.x, self.uuv.y, self.uuv.z)
+        self.uuv_start_x = self.uuv.x
 
         # 随机生成敌方机器人初始位置，确保在可通行区域（使用网格索引）
         while True:
@@ -224,7 +288,7 @@ class Env:
         """
 
         # 1.根据动作更新我方机器人位置
-        last_uuv_location = (self.uuv.x, self.uuv.y, self.uuv.z)
+        self.last_uuv_location = (self.uuv.x, self.uuv.y, self.uuv.z)
         self._move_robot(self.uuv, action)
         self.now_step += 1
 
@@ -244,7 +308,7 @@ class Env:
         # 仅在不越界、不撞山的情况下，才查询 TL 表（避免数组越界）
         if not self.done:
             # 3.查询计算声呐信号强度和奖励
-            last_TL = self._query_TL(self.enemy.y, *last_uuv_location)
+            last_TL = self._query_TL(self.enemy.y, *self.last_uuv_location)
             now_TL = self._query_TL(self.enemy.y, self.uuv.x, self.uuv.y, self.uuv.z)
             self.上次TL = last_TL
             self.当前TL = now_TL
@@ -270,24 +334,26 @@ class Env:
             # 达到敌人附近位置，立即胜利
             if (not self.done and self.uuv.x <= self.victory_x_idx):
                 self.done = True
-                self.reward = 3
+                self.reward = 20
                 self.info['result'] = '胜利, 达到敌人附近位置: ({}, {}, {}), 消耗步数: {}, 与曼哈顿距离比例: {:.2f}'.format(self.uuv.x, self.uuv.y, self.uuv.z, self.now_step, self.now_step / self.manhattan_distance)
 
             # 4.计算本步奖励（仅当未触发死亡条件时）
             if not self.done:
                 # 隐蔽性奖励
                 隐蔽奖励 = self.计算隐蔽奖励(now_TL)
-                # 单步行为奖励
-                单步行为奖励 = self.计算单步奖励(action)
+                # 靠近奖励
+                靠近奖励 = self.计算靠近奖励(action)
                 # TL 梯度奖励
                 TL梯度奖励 = self.计算TL梯度奖励(last_TL, now_TL)
                 # 范围平均 TL 奖励
                 范围平均TL奖励 = self.计算范围平均TL奖励()
+                # 固定时间惩罚
+                固定时间惩罚 = - 1 / self.recommended_steps * 8
 
-                self.reward = 隐蔽奖励 + TL梯度奖励 + 单步行为奖励 + 范围平均TL奖励
+                self.reward = 隐蔽奖励 + TL梯度奖励 + 靠近奖励 + 范围平均TL奖励 + 固定时间惩罚
                 self.info['reward_details'] = {
                     'stealth_reward': 隐蔽奖励,
-                    'approach_reward': 单步行为奖励,
+                    'approach_reward': 靠近奖励,
                     'tl_gradient_reward': TL梯度奖励,
                     'area_average_tl_reward': 范围平均TL奖励
                 }
@@ -325,7 +391,7 @@ class Env:
                     self.tl_table[enemy_y, uuv_x, uuv_y, uuv_z] = tl_value
 
         # 需要调换 uuv_x 和 uuv_y 的位置，使得 tl_table[enemy_y, uuv_x, uuv_y, uuv_z] 的访问方式契合地图
-        self.tl_table = np.transpose(self.tl_table, axes=(0, 2, 1, 3))
+        # self.tl_table = np.transpose(self.tl_table, axes=(0, 2, 1, 3))
 
         # 补充 TL 信息：计算范围内的地方，凡是不是山的位置，若TL信息为0，则补全为120dB
         for enemy_y in range(self.tl_table.shape[0]):
@@ -371,6 +437,8 @@ class Env:
         # 更新敌人位置
         if (self.terrain_3d[self.enemy.x, new_y, self.enemy.z] > 0.5):  # 确保新位置可通行
             self.enemy.y = new_y
+        else:
+            print_error(f"敌人尝试移动到不可通行位置: ({self.enemy.x}, {new_y}, {self.enemy.z}), 保持原地不动")
 
     def _query_TL(self, enemy_y, uuv_x, uuv_y, uuv_z):
         """查询传播损失 TL，根据我方机器人和敌方机器人的位置计算
@@ -391,22 +459,40 @@ class Env:
         :return: 隐蔽奖励，数值越大表示越隐蔽
         """
         # 安全隐蔽区: TL > proper_TL + 3dB，奖励为正，且随着TL增加而增加
-        return tanh((TL-66.0)/self.tl_tolerance) / self.recommended_steps
+        temp = tanh((TL-66.0)/self.tl_tolerance) / self.recommended_steps
+        if (temp > 0):
+            return temp * 0.8
+        else:
+            return temp * 1.5
 
-    def 计算单步奖励(self, action):
-        """根据动作计算单步奖励，接近敌人奖励为正，远离敌人奖励为负
+    def 计算靠近奖励(self, action):
+        """根据动作计算靠近奖励，接近敌人奖励为正，远离敌人奖励为负
 
         :param action: 动作编号，0-5分别对应六个方向
         :return: 单步奖励，数值越大表示越接近敌人
         """
-        approach_reward = 0
-        if (action == 0):
-            approach_reward = 1 / self.recommended_steps * 1.5
-        else:
-            approach_reward = -1 / self.recommended_steps
 
-        if (self.now_step > self.recommended_steps and approach_reward < 0):
-            approach_reward *= 2
+        # approach_reward = 0
+        # approach_reward = -1 / self.recommended_steps * 0.5
+        # if (action == 0):
+        #     approach_reward = 1 / self.recommended_steps
+        # else:
+        #     approach_reward = -1 / self.recommended_steps
+
+        # if (self.now_step > self.recommended_steps and approach_reward < 0):
+        #     approach_reward *= 2
+
+        # return approach_reward
+
+        """基于势能差计算奖励：距离缩短给正分，距离拉大给负分"""
+        # 假设目标是向更小的 X 坐标突进
+        current_distance = abs(self.uuv.x - self.victory_x_idx)
+
+        # 距离变化量：正数代表靠近了，负数代表远离了
+        distance_diff = abs(self.last_uuv_location[0] - self.victory_x_idx) - current_distance
+
+        # 给予奖励 (权重可以微调)
+        approach_reward = distance_diff / self.recommended_steps * 3
 
         return approach_reward
 
@@ -476,9 +562,11 @@ class Env:
             1. spatial_input: (1, 2, D, H, W) 的 float32 张量
                - 通道0: 传播损失 TL 热力图（围绕 UUV 的局部窗口）
                - 通道1: 地形可通行性（1.0=可通行, 0.0=不可通行，1=True, 0=False）
-            2. state_vector: (1, 7) 的 float32 张量
-               - (x_uuv, y_uuv, z_uuv, y_enemy, current_tl, gradient_tl, average_tl) 的绝对坐标
-            
+            2. state_vector: (1, N) 的 float32 张量（N 为配置中的 `state_vector_dim`）
+            #    - (x_dist, y_uuv, z_uuv, y_enemy, current_tl, gradient_tl, average_tl) 归一化处理数值
+               - (x_dist, y_uuv, z_uuv, y_enemy, current_tl, gradient_tl, average_tl, _cumulative_acoustic_signal) 归一化处理数值
+               - 格外注意！所有数值全部是归一化处理过的！不直接代表物理数据！！
+
             坐标约定: 地形索引为 terrain_3d[x, y, z]，向量存储为 (x, y, z)。
             张量设备: 所有张量直接在指定设备（默认 cuda）上创建。
 
@@ -490,13 +578,14 @@ class Env:
         输出参数:
             Tuple[torch.Tensor, torch.Tensor]:
                 spatial_input: 形状 (1, 2, window_size, window_size, window_size)，dtype=float32，device=指定设备。
-                state_vector: 形状 (1, 7)，dtype=float32，device=指定设备。
+                state_vector: 形状 (1, N)，dtype=float32，device=指定设备（N 为 `state_vector_dim`）。
 
         调用示例:
             >>> spatial_input, state_vector = env.get_observation_tensor(device="cuda", window_size=16)
             >>> spatial_input.shape, state_vector.shape
-            (torch.Size([1, 2, 16, 16, 16]), torch.Size([1, 7]))
+            (torch.Size([1, 2, 16, 16, 16]), torch.Size([1, 8]))
         """
+
         import torch
         self.net_obervation_spatial_tensor.fill_(0)
         # 构建 UUV 观测向量
@@ -562,21 +651,52 @@ class Env:
         ] = terrain_slice
 
         # --- 构建 state_vector ---
+        # --- 逻辑对齐：让“大数值”永远代表“好状态”
+        # 梯度限幅与归一化，超过 5.0 的梯度统一视为“极大改善”，低于 -5.0 统一视为“极大恶化”
+        clipped_grad = np.clip(self.当前TL - self.上次TL, -5.0, 5.0)
+        clipped_grad = clipped_grad / 5.0
+
+        # # X dist 零均值化
+        # x_dist = (self.uuv.x - self.victory_x_idx) / (self.map_width - self.victory_x_idx)
+        # x_dist = x_dist * 2 - 1
+        # X dist 零均值化
+        x_dist = 1 - (self.uuv.x - self.victory_x_idx) / (self.uuv_start_x_min_idx - self.victory_x_idx)
+
+        # 累计观测部分，平方以增强靠近 1 时的差异化数值
+        _cumulative_acoustic_signal = np.clip(self.cumulative_acoustic_signal, 0, self.tl_tolerance * 2.2) # 限幅，防止过大数值导致训练不稳定
+        _cumulative_acoustic_signal = _cumulative_acoustic_signal / (self.tl_tolerance * 2.2)  # 归一化到 0-1 范围
+        _cumulative_acoustic_signal = 1 - _cumulative_acoustic_signal  # 反转，使得接近被发现状态时数值接近0，远离被发现状态时数值接近1
+        # 开方处理，使得接近 1 时的数值差异更小，远离 1 时的数值差异更大，增强模型对隐蔽状态的敏感度
+        _cumulative_acoustic_signal = np.sqrt(np.clip(_cumulative_acoustic_signal, 0, 1))
+        # 平方处理，使得接近 1 时的数值差异更大，远离 1 时的数值差异更小，增强模型对被发现状态的敏感度
+        # _cumulative_acoustic_signal = _cumulative_acoustic_signal * _cumulative_acoustic_signal * np.sign(_cumulative_acoustic_signal)  # 保持符号
+
+        # 累计步数部分，平方之以增强靠近推荐步数上限时的差异化数值
+        step_ratio = 1.0 - (self.now_step / self.recommended_max_steps)
+        # step_ratio = step_ratio * step_ratio
+
         # 状态向量
         state_vector_np = np.array(
             [
                 [
-                    float(self.uuv.x),
-                    float(self.uuv.y),
-                    float(self.uuv.z),
-                    float(self.enemy.y),
-                    float(self.当前TL),
-                    float(self.当前TL - self.上次TL),
-                    float(self.区域平均TL),
+                    float(x_dist),  # 与胜利位置的相对 x 坐标，并且进行归一化（0-1）
+                    float(self.uuv.y / self.map_height),
+                    float(self.uuv.z / self.map_depth),
+                    float(self.enemy.y / self.map_height),
+                    float(tanh((self.当前TL - 66.0) / (self.tl_tolerance * 1.5))),      # 当前 TL
+                    float(clipped_grad),                                        # TL 梯度（经过限幅和归一化）
+                    float(tanh((self.区域平均TL - 66.0) / (self.tl_tolerance * 1.5))),   # 范围平均 TL（经过归一化）
+                    float(_cumulative_acoustic_signal),                          # 累计声学信号（经过归一化）
+                    float(step_ratio)                                           # 步数比例（经过平方处理）
                 ]
             ],
             dtype=np.float32,
         )
         self.net_state_vector_tensor = from_numpy(state_vector_np).to(device=device)
+
+        # 对 self.net_obervation_spatial_tensor[0] 进行 tanh 归一化，增强数值稳定性
+        self.net_obervation_spatial_tensor[0] = torch.tanh(
+            (self.net_obervation_spatial_tensor[0] - 66.0) / (self.tl_tolerance * 1.5)
+        )
 
         return self.net_obervation_spatial_tensor.unsqueeze(0), self.net_state_vector_tensor

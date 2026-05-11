@@ -36,7 +36,7 @@ def test_acnet_with_dropout():
     # 测试 train 模式（Dropout 激活）
     model.train()
     spatial_input1 = torch.randn(4, 2, 16, 16, 16, device='cuda')
-    state_vector1 = torch.randn(4, 7, device='cuda')
+    state_vector1 = torch.randn(4, 8, device='cuda')
     actor_logits1, _ = model(spatial_input1, state_vector1)
     
     # 第二次 forward（应该不同，因为 Dropout）

@@ -37,7 +37,7 @@ class RolloutBuffer:
         ...     pass
     """
 
-    def __init__(self, capacity: int = 10000, device: str = "cuda", env=None):
+    def __init__(self, capacity: int = 10000, device: str = "cuda", env=None, store_spatial: bool = True, state_vector_dim: int = 8):
         """初始化缓冲区。
 
         功能说明:
@@ -57,10 +57,16 @@ class RolloutBuffer:
         self.capacity = capacity
         self.device = device
         self.env = env
+        # 状态向量维度（由 Trainer 从配置传入）
+        self.state_vector_dim = int(state_vector_dim)
+        # 是否在缓冲区中持久化存储 spatial_input（默认启用以简化实现）
+        self.store_spatial = bool(store_spatial)
         self.ptr = 0  # 当前写入指针
 
         # --- 预分配张量存储轨迹 ---
-        # spatial_input: 不再存储，将在 iterate_minibatches 时动态重构
+        # spatial_input: 若 store_spatial=True，则在缓冲区中存储每步的 spatial 输入
+        # 否则保持 None 并在 iterate_minibatches 时动态重构
+        self._spatial_input = None
         self._state_vector = None
         self.actions = torch.zeros(capacity, dtype=torch.long, device=device)
         self.logprobs = torch.zeros(capacity, dtype=torch.float32, device=device)
@@ -85,11 +91,11 @@ class RolloutBuffer:
         功能说明:
             将单步经验（观测、动作、奖励、价值等）存储到预分配的张量中。
             spatial_input 张量已弃用（不再存储），将在 iterate_minibatches 时动态重构。
-            state_vector 张量形状应为 (1, 7) 的 batch 形式。
+            state_vector 张量形状应为 (1, N) 的 batch 形式，其中 N 为配置中的 state_vector_dim。
 
         输入参数:
             spatial_input (torch.Tensor): 已弃用，可传入 None。原为形状 (1, 2, D, H, W)。
-            state_vector (torch.Tensor): 形状 (1, 7)，状态向量。
+            state_vector (torch.Tensor): 形状 (1, N)，状态向量。
             action (torch.Tensor): 形状 () 或 (1,)，执行的动作编号。
             logprob (torch.Tensor): 形状 () 或 (1,)，动作的 log 概率。
             reward (float): 获得的奖励值。
@@ -102,7 +108,7 @@ class RolloutBuffer:
         调用示例:
             >>> buffer.add(
             ...     spatial_input=None,  # 已弃用
-            ...     state_vector=(1,7),
+            ...     state_vector=(1,N),
             ...     action=2,
             ...     logprob=-0.5,
             ...     reward=1.5,
@@ -114,14 +120,13 @@ class RolloutBuffer:
         
         assert self.ptr < self.capacity, f"缓冲区已满 (ptr={self.ptr}, capacity={self.capacity})"
 
-        # spatial_input 参数已弃用
-        if spatial_input is not None:
+        # spatial_input 参数弃用的警告：仅在不存储 spatial 时提醒用户
+        if not getattr(self, "store_spatial", False) and spatial_input is not None:
             warnings.warn(
-                "spatial_input 参数已弃用。从 v2.0 开始，spatial_input 不再存储，"
-                "将在 iterate_minibatches() 时根据 state_vector 动态重构。"
-                "请为 spatial_input 参数传入 None 以避免此警告。",
+                "spatial_input 参数已弃用。当 store_spatial=False 时，spatial_input 不会被持久化存储，"
+                "将在 iterate_minibatches() 时根据 state_vector 动态重构。若希望持久化，请将 cfg.ppo.store_spatial 设为 true。",
                 DeprecationWarning,
-                stacklevel=2
+                stacklevel=2,
             )
 
         # 第一次 add 时初始化 state_vector 张量
@@ -132,6 +137,32 @@ class RolloutBuffer:
                 dtype=torch.float32,
                 device=self.device,
             )
+
+        # 如果启用保存 spatial_input，则在缓冲区中存储（延迟分配）
+        if self.store_spatial:
+            assert spatial_input is not None, (
+                "store_spatial=True 时必须提供 spatial_input 参数。"
+            )
+            # 延迟分配 spatial 存储（去除 batch 维）
+            if self._spatial_input is None:
+                # spatial_input 期望形状为 (1, 2, D, H, W)
+                spatial_shape = spatial_input.shape[1:]
+                self._spatial_input = torch.zeros(
+                    (self.capacity,) + spatial_shape,
+                    dtype=spatial_input.dtype,
+                    device=self.device,
+                )
+            # 存储去掉 batch 维的 spatial
+            self._spatial_input[self.ptr] = spatial_input.squeeze(0)
+        else:
+            # 不存储 spatial_input：保持与之前相同的弃用警告行为
+            if spatial_input is not None:
+                warnings.warn(
+                    "spatial_input 参数已弃用。从 v2.0 开始，若 store_spatial=False，"
+                    "spatial_input 不会被持久化存储，将在 iterate_minibatches() 时根据 state_vector 动态重构。",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
 
         # 存储状态向量（squeeze 去掉 batch 维，因为缓冲区已包含 capacity 维）
         self._state_vector[self.ptr] = state_vector.squeeze(0)
@@ -157,18 +188,18 @@ class RolloutBuffer:
             所有计算在 GPU 上执行，支持批处理。
 
         输入参数:
-            batch_state_vector (torch.Tensor): 形状 (batch_size, 7)，包含坐标信息
+            batch_state_vector (torch.Tensor): 形状 (batch_size, N)，包含坐标信息（N = state_vector_dim）
                 - [:, 0]: x_uuv
                 - [:, 1]: y_uuv
                 - [:, 2]: z_uuv
                 - [:, 3]: y_enemy
-                - [:, 4-6]: 其他状态（不用于重构）
+                - [:, 4:8]: 其他状态（不用于重构，如 current_tl, gradient_tl, average_tl, cumulative_acoustic_signal），其余维为自定义或占位
 
         输出参数:
             torch.Tensor: 形状 (batch_size, 2, D, H, W)，重构的 spatial_input 张量
 
         调用示例:
-            >>> batch_state_vec = torch.randn(32, 7, device="cuda")
+            >>> batch_state_vec = torch.randn(32, 8, device="cuda")
             >>> spatial_batch = buffer._reconstruct_spatial_input_batch(batch_state_vec)
             >>> spatial_batch.shape
             torch.Size([32, 2, 16, 16, 11])
@@ -290,7 +321,7 @@ class RolloutBuffer:
             Generator：每次迭代返回一个包含如下字段的字典：
                 {
                     'spatial_input': (batch_size, 2, D, H, W),  # 动态重构
-                    'state_vector': (batch_size, 7),
+                    'state_vector': (batch_size, N),
                     'action': (batch_size,),
                     'logprob': (batch_size,),
                     'return': (batch_size,),
@@ -320,9 +351,15 @@ class RolloutBuffer:
             
             # 获取 batch state_vector
             batch_state_vector = self._state_vector[batch_indices]
-            
-            # 动态重构 spatial_input
-            batch_spatial_input = self._reconstruct_spatial_input_batch(batch_state_vector)
+
+            # 根据配置选择：直接使用已存储的 spatial_input，或在此动态重构
+            if self.store_spatial:
+                assert self._spatial_input is not None, (
+                    "已启用 store_spatial，但内部 _spatial_input 尚未分配。"
+                )
+                batch_spatial_input = self._spatial_input[batch_indices]
+            else:
+                batch_spatial_input = self._reconstruct_spatial_input_batch(batch_state_vector)
 
             minibatch = {
                 "spatial_input": batch_spatial_input,

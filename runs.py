@@ -714,6 +714,8 @@ def main(cfg: DictConfig) -> None:
     env = Env(cfg)
     print_info("环境初始化完成")
 
+    # return
+
     """
     # --- 地形诊断（可选）---
     # 用于验证坐标顺序和观测张量的正确性
@@ -807,16 +809,25 @@ def main(cfg: DictConfig) -> None:
 
     """
 
-    # --- 初始化 PPO 训练器 ---
-    trainer = PPOTrainer(cfg, device=device, env=env)
-    print_info("PPO 训练器初始化完成，spatial_input 动态重构已启用")
-
     # --- 获取输出目录（Hydra 管理） ---
     hydra_cfg = HydraConfig.get()
     output_dir = Path(hydra_cfg.runtime.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
     print_info(f"输出目录: {output_dir}")
     print_info(f"检查点目录: {checkpoint_dir}")
+    
+    # --- 初始化 PPO 训练器（传入输出目录以启用 TensorBoard） ---
+    trainer = PPOTrainer(cfg, device=device, env=env, output_dir=output_dir)
+    # 根据配置打印更准确的信息（避免误导）
+    try:
+        store_spatial = bool(cfg.ppo.store_spatial)
+    except Exception:
+        store_spatial = True
+
+    if store_spatial:
+        print_info("PPO 训练器初始化完成，spatial_input 存储已启用")
+    else:
+        print_info("PPO 训练器初始化完成，spatial_input 动态重构已启用")
 
     # --- 训练循环 ---
     print_info("=" * 60)
@@ -855,6 +866,9 @@ def main(cfg: DictConfig) -> None:
     print_info("=" * 60)
     trainer.save_checkpoint(checkpoint_dir)
     print_info(f"最终检查点已保存至: {checkpoint_dir}")
+    
+    # 关闭 TensorBoard 日志记录器
+    trainer.close()
 
 
 if __name__ == "__main__":

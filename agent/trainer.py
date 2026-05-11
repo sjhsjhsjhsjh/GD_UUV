@@ -3,12 +3,13 @@
 该模块实现 PPO 算法的训练逻辑，包括轨迹收集、策略更新与检查点管理。
 """
 
-from typing import Tuple, Dict, Any
+from typing import Tuple, Dict, Any, Optional
 from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from omegaconf import DictConfig
 
@@ -34,31 +35,37 @@ class PPOTrainer:
         ...           f"loss={update_info['policy_loss']:.4f}")
     """
 
-    def __init__(self, cfg: DictConfig, device: str = "cuda", env=None):
+    def __init__(self, cfg: DictConfig, device: str = "cuda", env=None, output_dir: Optional[Path] = None):
         """初始化 PPO 训练器。
 
         功能说明:
             初始化 ACNet、优化器、RolloutBuffer 与 PPO 超参数。
             所有模型参数与计算直接在指定设备上。
+            若启用 TensorBoard，将在指定输出目录下创建日志记录器。
 
         输入参数:
             cfg (DictConfig): Hydra 配置对象，包含 trainer 与 ppo 配置段。
             device (str): 计算设备，默认为 "cuda"。
             env: 环境对象，用于 RolloutBuffer 动态重构 spatial_input。
+            output_dir (Optional[Path]): Hydra 运行目录，用于创建 TensorBoard 日志目录。
+                若为 None 或 TensorBoard 禁用，则不创建日志记录器。
 
         输出参数:
             无。
 
         调用示例:
-            >>> trainer = PPOTrainer(cfg, device="cuda", env=env)
+            >>> trainer = PPOTrainer(cfg, device="cuda", env=env, output_dir=Path("./outputs/run"))
         """
         self.cfg = cfg
         self.device = device
         self.env = env
 
+        # --- 状态向量维度（直接从配置读取并信任其值） ---
+        self.state_vector_dim = int(cfg.ppo.state_vector_dim)
+
         # --- 初始化 ACNet 网络 ---
-        self.model = ACNet(device=device).to(device)
-        print_info(f"ACNet 初始化完成，设备: {device}")
+        self.model = ACNet(device=device, state_vector_dim=self.state_vector_dim).to(device)
+        print_info(f"ACNet 初始化完成，设备: {device}，state_vector_dim={self.state_vector_dim}")
 
         # --- 初始化优化器（添加权重衰减 L2 正则化）---
         self.optimizer = optim.Adam(
@@ -68,33 +75,33 @@ class PPOTrainer:
         )
         print_info(f"优化器初始化完成，学习率: {cfg.ppo.learning_rate}，权重衰减: 1e-4")
 
-        # --- 初始化 RolloutBuffer（传入 env 用于动态重构 spatial_input）---
+        # --- 初始化 RolloutBuffer（传入 env，并通过 store_spatial 控制是否持久化 spatial_input）---
+        try:
+            store_spatial = cfg.ppo.store_spatial
+        except Exception:
+            store_spatial = True
+
         self.buffer = RolloutBuffer(
             capacity=cfg.ppo.rollout_steps,
             device=device,
             env=env,
+            store_spatial=store_spatial,
+            state_vector_dim=self.state_vector_dim,
         )
-        print_info(f"RolloutBuffer 初始化完成，容量: {cfg.ppo.rollout_steps}，spatial_input 动态重构已启用")
+        if store_spatial:
+            print_info(f"RolloutBuffer 初始化完成，容量: {cfg.ppo.rollout_steps}，spatial_input 存储已启用")
+        else:
+            print_info(f"RolloutBuffer 初始化完成，容量: {cfg.ppo.rollout_steps}，spatial_input 动态重构已启用")
 
-        # --- 初始化学习率调度器（线性预热 + 余弦衰减）---
+        # --- 初始化学习率调度器（按 epoch 线性衰减到 0）---
         max_epochs = cfg.trainer.max_epochs
-        warmup_steps = max(1, cfg.ppo.rollout_steps // 10)  # 前 10% 的 rollout steps 进行预热
-        self._warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            total_iters=warmup_steps,
+        def lr_lambda(epoch: int) -> float:
+            return max(0.0, 1.0 - float(epoch) / float(max_epochs))
+
+        self.scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+        print_info(
+            f"LR调度器初始化完成：线性衰减至0，max_epochs={max_epochs}，初始LR={cfg.ppo.learning_rate}"
         )
-        self._cosine_scheduler = CosineAnnealingLR(
-            self.optimizer,
-            T_max=max_epochs,
-            eta_min=1e-6,
-        )
-        self.scheduler = SequentialLR(
-            self.optimizer,
-            schedulers=[self._warmup_scheduler, self._cosine_scheduler],
-            milestones=[warmup_steps],
-        )
-        print_info(f"LR调度器初始化完成：预热步数={warmup_steps}，最大epoch={max_epochs}")
 
         # --- PPO 超参数 ---
         self.gamma = cfg.ppo.gamma
@@ -110,6 +117,23 @@ class PPOTrainer:
         self.global_step = 0
         self.episode = 0
         self.current_epoch = 0
+        
+        # --- TensorBoard 日志记录器初始化 ---
+        self.tb_writer = None
+        self.tb_log_interval = cfg.trainer.tensorboard.log_interval_steps
+        self.tb_hist_interval = cfg.trainer.tensorboard.hist_interval_epochs
+        self.tb_flush_interval = cfg.trainer.tensorboard.flush_interval_seconds
+        self.tb_minibatch_counter = 0  # 用于控制标量日志记录频率
+        
+        if cfg.trainer.tensorboard.enabled and output_dir is not None:
+            tb_log_dir = output_dir / cfg.trainer.tensorboard.subdir
+            tb_log_dir.mkdir(parents=True, exist_ok=True)
+            self.tb_writer = SummaryWriter(log_dir=str(tb_log_dir))
+            print_info(f"TensorBoard 日志记录器已初始化: {tb_log_dir}")
+        elif cfg.trainer.tensorboard.enabled and output_dir is None:
+            print_warn("TensorBoard 已启用但未提供 output_dir，日志记录器未初始化")
+        else:
+            print_info("TensorBoard 日志记录已禁用")
 
     def collect_rollout(
         self, env: Any, num_steps: int, max_episode_steps: int = 10000
@@ -153,7 +177,7 @@ class PPOTrainer:
             while step_count < num_steps:
                 # 获取当前观测
                 spatial_input, state_vector = env.get_observation_tensor(device=self.device)
-                assert state_vector.shape == (1, 7), f"状态向量维度错误，期望 (1, 7)，实际 {state_vector.shape}"
+                assert state_vector.shape == (1, self.state_vector_dim), f"状态向量维度错误，期望 (1, {self.state_vector_dim})，实际 {state_vector.shape}"
 
                 # 前向传播，获取动作 logits 与价值估计
                 actor_logits, value = self.model(spatial_input, state_vector)
@@ -206,6 +230,11 @@ class PPOTrainer:
                             f"Episode {num_episodes} 结束: 奖励={episode_reward:.2f}, "
                             f"步数={episode_length}, 理由={info.get('result', 'max_steps')}"
                         )
+                    
+                    # 记录 episode 指标到 TensorBoard
+                    if self.tb_writer is not None:
+                        self.tb_writer.add_scalar('episode/reward', episode_reward, self.episode + num_episodes)
+                        self.tb_writer.add_scalar('episode/length', episode_length, self.episode + num_episodes)
 
                     num_episodes += 1
                     total_reward += episode_reward
@@ -230,10 +259,10 @@ class PPOTrainer:
         )
 
         self.episode += num_episodes
-        
+
         # 获取当前学习率用于日志
         current_lr = self.optimizer.param_groups[0]['lr']
-        
+
         return {
             "reward_mean": reward_mean,
             "episode_rewards": total_reward,
@@ -271,6 +300,7 @@ class PPOTrainer:
         value_losses = []
         entropies = []
         total_losses = []
+        grad_norms = []
 
         for epoch in range(self.epochs):
             for minibatch in self.buffer.iterate_minibatches(self.minibatch_size):
@@ -293,10 +323,11 @@ class PPOTrainer:
 
                 # --- PPO-Clip 策略损失 ---
                 ratio = torch.exp(new_logprobs - old_logprobs)
+                # ---> 优势函数归一化 <---
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
                 surr1 = ratio * advantages
                 surr2 = (
-                    torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio)
-                    * advantages
+                    torch.clamp(ratio, 1 - self.clip_ratio, 1 + self.clip_ratio) * advantages
                 )
                 policy_loss = -torch.min(surr1, surr2).mean()
 
@@ -311,7 +342,7 @@ class PPOTrainer:
                 # 反向传播与优化
                 self.optimizer.zero_grad()
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                 self.optimizer.step()
 
                 # 记录损失
@@ -319,18 +350,30 @@ class PPOTrainer:
                 value_losses.append(value_loss.item())
                 entropies.append(entropy.item())
                 total_losses.append(total_loss.item())
+                grad_norms.append(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm)
 
                 self.global_step += 1
+                self.tb_minibatch_counter += 1
+                
+                # 记录标量指标到 TensorBoard（根据记录间隔）
+                if self.tb_writer is not None and (self.tb_log_interval == 0 or self.tb_minibatch_counter % self.tb_log_interval == 0):
+                    self.tb_writer.add_scalar('train/policy_loss', policy_loss.item(), self.global_step)
+                    self.tb_writer.add_scalar('train/value_loss', value_loss.item(), self.global_step)
+                    self.tb_writer.add_scalar('train/entropy', entropy.item(), self.global_step)
+                    self.tb_writer.add_scalar('train/total_loss', total_loss.item(), self.global_step)
+                    self.tb_writer.add_scalar('train/grad_norm', grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm, self.global_step)
+                    self.tb_writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
 
         avg_policy_loss = np.mean(policy_losses) if policy_losses else 0.0
         avg_value_loss = np.mean(value_losses) if value_losses else 0.0
         avg_entropy = np.mean(entropies) if entropies else 0.0
         avg_total_loss = np.mean(total_losses) if total_losses else 0.0
+        avg_grad_norm = np.mean(grad_norms) if grad_norms else 0.0
 
         print_info(
             f"PPO 更新完成 (global_step={self.global_step}): "
             f"策略损失={avg_policy_loss:.4f}, 价值损失={avg_value_loss:.4f}, "
-            f"熵={avg_entropy:.4f}, 总损失={avg_total_loss:.4f}"
+            f"熵={avg_entropy:.4f}, 梯度范数={avg_grad_norm:.4f}, 总损失={avg_total_loss:.4f}"
         )
 
         # 更新学习率调度器
@@ -338,6 +381,14 @@ class PPOTrainer:
         self.current_epoch += 1
         current_lr = self.optimizer.param_groups[0]['lr']
         print_info(f"Epoch {self.current_epoch} LR调度完成，当前学习率: {current_lr:.6f}")
+        
+        # 周期性记录权重和梯度直方图
+        if self.tb_writer is not None and self.current_epoch % self.tb_hist_interval == 0:
+            for name, param in self.model.named_parameters():
+                if param.grad is not None:
+                    self.tb_writer.add_histogram(f'weights/{name}', param.data.cpu(), self.current_epoch)
+                    self.tb_writer.add_histogram(f'gradients/{name}', param.grad.data.cpu(), self.current_epoch)
+            print_info(f"Epoch {self.current_epoch}: 权重和梯度直方图已写入 TensorBoard")
 
         return {
             "policy_loss": avg_policy_loss,
@@ -390,6 +441,27 @@ class PPOTrainer:
             f"optimizer={optimizer_path.name}, "
             f"state={state_path.name}"
         )
+
+    def close(self) -> None:
+        """关闭 TensorBoard 日志记录器。
+
+        功能说明:
+            刷新并关闭 TensorBoard SummaryWriter，确保所有待写入数据被持久化。
+            应在训练结束或异常退出时调用。
+
+        输入参数:
+            无。
+
+        输出参数:
+            无。
+
+        调用示例:
+            >>> trainer.close()
+        """
+        if self.tb_writer is not None:
+            self.tb_writer.flush()
+            self.tb_writer.close()
+            print_info("TensorBoard 日志记录器已关闭并刷新")
 
     def load_checkpoint(self, checkpoint_dir: Path, step: int) -> None:
         """加载训练检查点。
