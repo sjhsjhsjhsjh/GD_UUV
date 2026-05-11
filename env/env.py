@@ -207,7 +207,7 @@ class Env:
         y = np.arange(self.terrain_3d.shape[1])
         X, Y = np.meshgrid(x, y, indexing="ij")
 
-        for z in range(1, 6):
+        for z in range(0, 7):
             # TL: 索引顺序 [enemy_y, uuv_x, uuv_y, uuv_z]
             tl_slice = self.tl_table[enemy_y, :, :, z].astype(np.float32)
 
@@ -492,7 +492,7 @@ class Env:
         distance_diff = abs(self.last_uuv_location[0] - self.victory_x_idx) - current_distance
 
         # 给予奖励 (权重可以微调)
-        approach_reward = distance_diff / self.recommended_steps * 3
+        approach_reward = distance_diff / self.recommended_steps * 2
 
         return approach_reward
 
@@ -681,7 +681,7 @@ class Env:
                 [
                     float(x_dist),  # 与胜利位置的相对 x 坐标，并且进行归一化（0-1）
                     float(self.uuv.y / self.map_height),
-                    float(self.uuv.z / self.map_depth),
+                    float((self.uuv.z - 3) / 3.0),
                     float(self.enemy.y / self.map_height),
                     float(tanh((self.当前TL - 66.0) / (self.tl_tolerance * 1.5))),      # 当前 TL
                     float(clipped_grad),                                        # TL 梯度（经过限幅和归一化）

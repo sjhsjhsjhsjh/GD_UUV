@@ -108,10 +108,33 @@ class PPOTrainer:
         self.gae_lambda = cfg.ppo.gae_lambda
         self.clip_ratio = cfg.ppo.clip_ratio
         self.value_coef = cfg.ppo.value_coef
-        self.entropy_coef = cfg.ppo.entropy_coef
+        # 初始熵系数（来自配置），后续可按计划衰减
+        self.entropy_coef = float(cfg.ppo.entropy_coef)
+        self.initial_entropy_coef = float(cfg.ppo.entropy_coef)
         self.epochs = cfg.ppo.epochs
         self.minibatch_size = cfg.ppo.minibatch_size
         self.checkpoint_interval = cfg.trainer.checkpoint_interval
+
+        # --- 熵衰减（Entropy Decay）配置解析 ---
+        try:
+            ed_cfg = cfg.ppo.entropy_decay
+            self.entropy_decay_enabled = bool(getattr(ed_cfg, 'enabled', True))
+            self.entropy_decay_type = str(getattr(ed_cfg, 'type', 'linear'))
+            self.entropy_decay_final = float(getattr(ed_cfg, 'final_coef', 0.0))
+            self.entropy_decay_start = int(getattr(ed_cfg, 'start_epoch', 0))
+            end_epoch_val = getattr(ed_cfg, 'end_epoch', None)
+            if end_epoch_val is None:
+                self.entropy_decay_end = int(cfg.trainer.max_epochs)
+            else:
+                self.entropy_decay_end = int(end_epoch_val)
+            self.entropy_decay_rate = float(getattr(ed_cfg, 'decay_rate', 0.99))
+        except Exception:
+            self.entropy_decay_enabled = False
+            self.entropy_decay_type = 'linear'
+            self.entropy_decay_final = 0.0
+            self.entropy_decay_start = 0
+            self.entropy_decay_end = int(cfg.trainer.max_epochs)
+            self.entropy_decay_rate = 0.99
 
         # --- 训练状态 ---
         self.global_step = 0
@@ -134,6 +157,39 @@ class PPOTrainer:
             print_warn("TensorBoard 已启用但未提供 output_dir，日志记录器未初始化")
         else:
             print_info("TensorBoard 日志记录已禁用")
+
+    def _compute_entropy_coef(self) -> float:
+        """计算当前训练周期应使用的熵系数（按配置的衰减计划）。
+
+        功能说明:
+            根据初始化时解析的 `entropy_decay` 配置，返回当前应使用的熵系数。
+            支持 `linear` 和 `exponential` 两种衰减策略，且在 start_epoch 之前返回初始值，
+            在 end_epoch 之后返回 final_coef。
+
+        返回:
+            float: 当前熵系数值。
+        """
+        if not getattr(self, 'entropy_decay_enabled', False):
+            return float(self.initial_entropy_coef)
+
+        epoch = int(self.current_epoch)
+        if epoch < self.entropy_decay_start:
+            return float(self.initial_entropy_coef)
+        if epoch >= self.entropy_decay_end:
+            return float(self.entropy_decay_final)
+
+        if self.entropy_decay_type == 'linear':
+            denom = max(1, self.entropy_decay_end - self.entropy_decay_start)
+            progress = float(epoch - self.entropy_decay_start) / float(denom)
+            coef = float(self.initial_entropy_coef) + (float(self.entropy_decay_final) - float(self.initial_entropy_coef)) * progress
+            return float(coef)
+
+        # 默认使用指数衰减（exponential）策略
+        n = epoch - self.entropy_decay_start
+        coef = float(self.initial_entropy_coef) * (float(self.entropy_decay_rate) ** n)
+        if coef < float(self.entropy_decay_final):
+            return float(self.entropy_decay_final)
+        return float(coef)
 
     def collect_rollout(
         self, env: Any, num_steps: int, max_episode_steps: int = 10000
@@ -296,6 +352,10 @@ class PPOTrainer:
         """
         self.model.train()
 
+        # 计算当前训练周期的动态熵系数（用于 loss 计算与 TensorBoard 记录）
+        current_entropy_coef = self._compute_entropy_coef()
+        print_info(f"当前 entropy_coef={current_entropy_coef:.6f} (epoch={self.current_epoch})")
+
         policy_losses = []
         value_losses = []
         entropies = []
@@ -334,9 +394,9 @@ class PPOTrainer:
                 # --- 价值函数损失 ---
                 value_loss = nn.MSELoss()(values.squeeze(-1), returns)
 
-                # --- 总损失 ---
+                # --- 总损失 (使用动态熵系数) ---
                 total_loss = (
-                    policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
+                    policy_loss + self.value_coef * value_loss - current_entropy_coef * entropy
                 )
 
                 # 反向传播与优化
@@ -362,6 +422,7 @@ class PPOTrainer:
                     self.tb_writer.add_scalar('train/entropy', entropy.item(), self.global_step)
                     self.tb_writer.add_scalar('train/total_loss', total_loss.item(), self.global_step)
                     self.tb_writer.add_scalar('train/grad_norm', grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm, self.global_step)
+                    self.tb_writer.add_scalar('train/entropy_coef', current_entropy_coef, self.global_step)
                     self.tb_writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
 
         avg_policy_loss = np.mean(policy_losses) if policy_losses else 0.0
@@ -428,11 +489,12 @@ class PPOTrainer:
         torch.save(self.model.state_dict(), str(model_path))
         torch.save(self.optimizer.state_dict(), str(optimizer_path))
 
-        # 保存训练元状态
+        # 保存训练元状态（包含 current_epoch 以便恢复训练时保持熵衰减连续性）
         np.savez_compressed(
             str(state_path),
             global_step=self.global_step,
             episode=self.episode,
+            current_epoch=self.current_epoch,
         )
 
         print_info(
@@ -502,6 +564,12 @@ class PPOTrainer:
             meta = np.load(str(state_path))
             self.global_step = int(meta["global_step"])
             self.episode = int(meta["episode"])
+            # 若 checkpoint 中包含 current_epoch，则恢复它以保持熵衰减进度一致
+            if 'current_epoch' in meta:
+                try:
+                    self.current_epoch = int(meta['current_epoch'])
+                except Exception:
+                    pass
 
         print_info(
             f"检查点已加载: "

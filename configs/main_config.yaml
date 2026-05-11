@@ -121,7 +121,7 @@ ppo:
   # 价值函数损失权重
   value_coef: 0.5
   # 熵损失权重
-  entropy_coef: 0.07
+  entropy_coef: 0.03
   # 策略更新 epoch 数
   epochs: 6
   # Minibatch 大小
@@ -132,3 +132,18 @@ ppo:
   store_spatial: true
   # 状态向量维度（可在此处修改 state_vector 的维度，默认为 8）
   state_vector_dim: 9
+  # ----------------- 熵衰减配置（Entropy Decay） -----------------
+  # 在训练早期使用配置中的 entropy_coef，随后按计划逐步衰减到 final_coef
+  entropy_decay:
+    # 是否启用熵衰减
+    enabled: true
+    # 衰减类型：linear | exponential
+    type: linear
+    # 衰减结束时的熵系数
+    final_coef: 0.0
+    # 开始衰减的训练 epoch（从 0 开始计数）
+    start_epoch: 0
+    # 结束衰减的训练 epoch，若为 null 则使用 trainer.max_epochs
+    end_epoch: null
+    # 指数衰减时每 epoch 的乘法因子，仅对 type=exponential 有效
+    decay_rate: 0.99
