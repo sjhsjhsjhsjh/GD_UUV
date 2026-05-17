@@ -710,111 +710,16 @@ def main(cfg: DictConfig) -> None:
     else:
         print_info(f"使用设备: {device}")
 
-    # --- 初始化环境 ---
-    env = Env(cfg)
-    print_info("环境初始化完成")
-
-    # return
-
-    """
-    # --- 地形诊断（可选）---
-    # 用于验证坐标顺序和观测张量的正确性
-    hydra_cfg = HydraConfig.get()
-    output_dir = Path(hydra_cfg.runtime.output_dir)
-    print_info("\n开始地形数据诊断...")
-    visualize_terrain_slice(env, output_dir, test_pos=(20, 50, 3))
-    print_info("数值对比诊断完成")
-    
-    print_info("生成三维地形可视化...")
-    visualize_terrain_3d(env, output_dir, test_pos=(20, 50, 3))
-    print_info("地形诊断完成。结果已保存到 output_dir\n")
-
-    return
-    """
-
-    """
-    # ========== 开始测试套件 ==========
-    print_info("\n" + "🧪 " + "="*68)
-    print_info("开始 Env 模块功能测试套件")
-    print_info("="*70)
-    
-    # Phase 1: 基础功能测试
-    phase1_results = test_basic_reset_and_step(env)
-    
-    # Phase 2: 奖励机制验证
-    phase2_results = test_reward_mechanisms(env)
-    
-    # Phase 3: 边界条件测试
-    phase3_results = test_boundary_conditions(env)
-    
-    # Phase 4: 性能和统计分析
-    phase4_results = test_performance_and_statistics(env)
-    
-    # ========== 汇总测试结果 ==========
-    print_info("\n" + "="*70)
-    print_info("测试汇总报告")
-    print_info("="*70)
-    
-    console = Console()
-    
-    # 创建汇总表
-    summary_table = Table(title="Env 测试总体结果", show_header=True, header_style="bold cyan")
-    summary_table.add_column("测试阶段", style="cyan")
-    summary_table.add_column("测试项目", style="magenta")
-    summary_table.add_column("结果", style="green")
-    summary_table.add_column("详情", style="yellow")
-    
-    all_results = [
-        ("Phase 1: 基础功能", phase1_results),
-        ("Phase 2: 奖励机制", phase2_results),
-        ("Phase 3: 边界条件", phase3_results),
-        ("Phase 4: 性能统计", phase4_results),
-    ]
-    
-    total_tests = 0
-    passed_tests = 0
-    
-    for phase_name, phase_dict in all_results:
-        for test_name, (passed, detail) in phase_dict.items():
-            total_tests += 1
-            if passed:
-                passed_tests += 1
-                status = "✓ PASS"
-                status_style = "green"
-            else:
-                status = "✗ FAIL"
-                status_style = "red"
-            
-            summary_table.add_row(
-                phase_name,
-                test_name,
-                f"[{status_style}]{status}[/{status_style}]",
-                detail[:50] + "..." if len(detail) > 50 else detail
-            )
-    
-    console.print(summary_table)
-    
-    # 输出最终统计
-    print_info(f"\n{'='*70}")
-    print_info(f"测试总数: {total_tests}  通过: {passed_tests}  失败: {total_tests - passed_tests}")
-    print_info(f"通过率: {passed_tests / total_tests * 100:.1f}%")
-    print_info(f"{'='*70}")
-    
-    if passed_tests == total_tests:
-        print_info("🎉 所有测试通过！Env 模块功能完整。")
-    else:
-        print_warn(f"⚠️  有 {total_tests - passed_tests} 个测试失败，请检查详情。")
-    
-    print_info("\n✓ 测试套件完成，程序退出。")
-
-    """
-
     # --- 获取输出目录（Hydra 管理） ---
     hydra_cfg = HydraConfig.get()
     output_dir = Path(hydra_cfg.runtime.output_dir)
     checkpoint_dir = output_dir / "checkpoints"
     print_info(f"输出目录: {output_dir}")
     print_info(f"检查点目录: {checkpoint_dir}")
+
+    # --- 初始化环境 ---
+    env = Env(cfg, output_dir)
+    print_info("环境初始化完成")
     
     # --- 初始化 PPO 训练器（传入输出目录以启用 TensorBoard） ---
     trainer = PPOTrainer(cfg, device=device, env=env, output_dir=output_dir)

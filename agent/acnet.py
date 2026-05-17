@@ -192,56 +192,109 @@ class ACNet(nn.Module):
         # 状态向量输入维度（由配置传入）
         self._state_vector_dim = int(state_vector_dim)
 
-        # Spatial Branch 输入: (B, 2, D, H, W)
-        # Conv1 + Residual Block 输出: (B, 32, D, H, W)
-        self._spatial_conv1 = nn.Conv3d(in_channels=2, out_channels=32, kernel_size=5, padding=2)
+        # Spatial Branch 输入: (B, 2, 3, 21, 21)，2 通道分别为传播损失 TL 图和地形可通性数组
+        # Conv1 + Residual Block 输出: (B, 32, 3, 21, 21)
+        self._spatial_conv1 = nn.Conv3d(in_channels=2, out_channels=32, kernel_size=3, padding=1, stride=1) # (3, 21, 21) -> (3, 19, 19)
         self._spatial_bn1 = nn.BatchNorm3d(num_features=32)
-        self._spatial_residual1 = ResidualBlock3D(32, 32)
-        self._spatial_dropout1 = nn.Dropout3d(p=0.3)
+        self._spatial_residual1 = ResidualBlock3D(32, 32, stride=1)
+        # self._spatial_dropout1 = nn.Dropout3d(p=0.3)
 
-        # Conv2 + Residual Block + Downsample 输出: (B, 64, D/2, H/2, W/2)
-        self._spatial_conv2 = nn.Conv3d(in_channels=32, out_channels=64, kernel_size=3, padding=1, stride=1)
+        # Conv2 + Residual Block + Downsample 输出: (B, 64, 3, 10, 10)
+        self._spatial_conv2 = nn.Conv3d(in_channels=32, out_channels=64, kernel_size=3, padding=1, stride=(2, 2, 1))
         self._spatial_bn2 = nn.BatchNorm3d(num_features=64)
-        self._spatial_residual2 = ResidualBlock3D(64, 64)
-        self._spatial_dropout2 = nn.Dropout3d(p=0.3)
+        self._spatial_residual2 = ResidualBlock3D(64, 64, stride=1)
+        # self._spatial_dropout2 = nn.Dropout3d(p=0.3)
 
-        # Conv3 + Residual Block 输出: (B, 128, D/2, H/2, W/2)
-        self._spatial_conv3 = nn.Conv3d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
+        # Conv3 + Residual Block 输出: (B, 128, 3, 5, 5)
+        self._spatial_conv3 = nn.Conv3d(in_channels=64, out_channels=128, kernel_size=3, padding=1, stride=(2, 2, 1))
         self._spatial_bn3 = nn.BatchNorm3d(num_features=128)
-        self._spatial_residual3 = ResidualBlock3D(128, 128)
-        self._spatial_dropout3 = nn.Dropout3d(p=0.3)
+        self._spatial_residual3 = ResidualBlock3D(128, 128, stride=1)
+        # self._spatial_dropout3 = nn.Dropout3d(p=0.3)
 
         # GAP 输出: (B, 128, 1, 1, 1) -> 展平后 (B, 128)
-        self._spatial_gap = nn.AdaptiveAvgPool3d(output_size=1)
+        # self._spatial_gap = nn.AdaptiveAvgPool3d(output_size=1)
+        self._spatial_flatten = nn.Flatten(start_dim=1)
+
+        self._spatial_proj = nn.Sequential(
+            nn.Linear(13824, 256), 
+            nn.LayerNorm(256), 
+            nn.ReLU(inplace=True)
+        )
 
         # Vector Branch 输入: (B, N)，N 为可配置的状态向量维度
         # MLP 输出: (B, 64)
+        # self._vector_mlp = nn.Sequential(
+        #     nn.Linear(self._state_vector_dim, 64),
+        #     nn.ReLU(inplace=True),
+        #     # nn.Dropout(p=0.2),
+        #     nn.Linear(64, 64),
+        #     nn.ReLU(inplace=True),
+        # )
+        # self._vector_dropout = nn.Dropout(p=0.2)
         self._vector_mlp = nn.Sequential(
             nn.Linear(self._state_vector_dim, 64),
             nn.ReLU(inplace=True),
-            nn.Dropout(p=0.2),
             nn.Linear(64, 64),
             nn.ReLU(inplace=True),
         )
-        self._vector_dropout = nn.Dropout(p=0.2)
 
         # Fusion: 使用 CrossAttentionFusion 替代简单拼接
         # 输入: (B, 128) + (B, 64) -> 输出: (B, 256)
-        self._fusion = CrossAttentionFusion(spatial_dim=128, vector_dim=64, fusion_dim=256)
+        # self._fusion = CrossAttentionFusion(spatial_dim=128, vector_dim=64, fusion_dim=256)
+        self._fusion_mlp = nn.Sequential(
+            nn.Linear(320, 256), 
+            nn.LayerNorm(256), 
+            nn.ReLU(inplace=True)
+        )
 
-        # Actor Head: (B, 256) -> (B, 7)
-        self._actor_head = nn.Linear(256, 7)
+        # # Actor Head: (B, 256) -> (B, 7)
+        # self._actor_head = nn.Linear(256, 7)
 
-        # Critic Head: (B, 256) -> (B, 1)
-        self._critic_head = nn.Linear(256, 1)
+        # # Critic Head: (B, 256) -> (B, 1)
+        # self._critic_head = nn.Linear(256, 1)
 
-        # 对 Actor 和 Critic 头应用正交初始化
-        nn.init.orthogonal_(self._actor_head.weight, gain=1)
-        self._actor_head.weight.data.mul_(0.01)
-        nn.init.constant_(self._actor_head.bias, 0.0)
+        # 建议在融合层之后分叉
+        self._actor_head = nn.Sequential(
+            nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 7)
+        )
+        self._critic_head = nn.Sequential(
+            nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 1)
+        )
 
-        nn.init.orthogonal_(self._critic_head.weight, gain=1)
-        nn.init.constant_(self._critic_head.bias, 0.0)
+        # # 对 Actor 和 Critic 头应用正交初始化
+        # nn.init.orthogonal_(self._actor_head.weight, gain=1)
+        # self._actor_head.weight.data.mul_(0.01)
+        # nn.init.constant_(self._actor_head.bias, 0.0)
+
+        # nn.init.orthogonal_(self._critic_head.weight, gain=1)
+        # nn.init.constant_(self._critic_head.bias, 0.0)
+
+        # 1. 全局初始化
+        for m in self.modules():
+            if isinstance(m, (nn.Conv3d, nn.Linear)):
+                nn.init.orthogonal_(m.weight.data, gain=1)
+                # 全局先按 ReLU 增益处理
+                m.weight.data.mul_(1.414)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        # 2. 针对性修正：Actor 输出层
+        # 提取最后一层 Linear
+        last_actor_layer = [m for m in self._actor_head if isinstance(m, nn.Linear)][-1]
+        # 重新正交化，不使用全局的 1.414 增益，而是使用极小的 0.01
+        nn.init.orthogonal_(last_actor_layer.weight.data, gain=1)
+        last_actor_layer.weight.data.mul_(0.01)
+        if last_actor_layer.bias is not None:
+            nn.init.constant_(last_actor_layer.bias, 0)
+
+        # 3. 针对性修正：Critic 输出层
+        last_critic_layer = [m for m in self._critic_head if isinstance(m, nn.Linear)][
+            -1
+        ]
+        # 重新正交化，设为 1.0 即可（因为它之前被全局逻辑乘了 1.414，所以这里必须重置）
+        nn.init.orthogonal_(last_critic_layer.weight.data, gain=1)
+        if last_critic_layer.bias is not None:
+            nn.init.constant_(last_critic_layer.bias, 0)
 
     def forward(self, spatial_input: torch.Tensor, state_vector: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """执行前向传播并返回策略 logits 与状态价值。
@@ -276,16 +329,16 @@ class ACNet(nn.Module):
         """
 
         # 设备检查：确保输入在 GPU 上
-        if not spatial_input.is_cuda:
-            raise RuntimeError(
-                f"spatial_input 必须在 GPU 上执行。当前设备: {spatial_input.device}。"
-                "请使用 spatial_input.to('cuda') 或在创建张量时指定 device='cuda'。"
-            )
-        if not state_vector.is_cuda:
-            raise RuntimeError(
-                f"state_vector 必须在 GPU 上执行。当前设备: {state_vector.device}。"
-                "请使用 state_vector.to('cuda') 或在创建张量时指定 device='cuda'。"
-            )
+        # if not spatial_input.is_cuda:
+        #     raise RuntimeError(
+        #         f"spatial_input 必须在 GPU 上执行。当前设备: {spatial_input.device}。"
+        #         "请使用 spatial_input.to('cuda') 或在创建张量时指定 device='cuda'。"
+        #     )
+        # if not state_vector.is_cuda:
+        #     raise RuntimeError(
+        #         f"state_vector 必须在 GPU 上执行。当前设备: {state_vector.device}。"
+        #         "请使用 state_vector.to('cuda') 或在创建张量时指定 device='cuda'。"
+        #     )
 
         if spatial_input.dim() != 5:
             raise ValueError(f"spatial_input 必须为 5 维张量 (B, 2, D, H, W)，当前维度: {spatial_input.dim()}")
@@ -307,34 +360,39 @@ class ACNet(nn.Module):
         spatial_feature = self._spatial_bn1(spatial_feature)
         spatial_feature = torch.relu(spatial_feature)
         spatial_feature = self._spatial_residual1(spatial_feature)
-        spatial_feature = self._spatial_dropout1(spatial_feature)
+        # spatial_feature = self._spatial_dropout1(spatial_feature)
 
         # (B, 32, D, H, W) -> Conv -> BN -> ReLU -> Residual -> Dropout -> (B, 64, D, H, W)
         spatial_feature = self._spatial_conv2(spatial_feature)
         spatial_feature = self._spatial_bn2(spatial_feature)
         spatial_feature = torch.relu(spatial_feature)
         spatial_feature = self._spatial_residual2(spatial_feature)
-        spatial_feature = self._spatial_dropout2(spatial_feature)
+        # spatial_feature = self._spatial_dropout2(spatial_feature)
 
         # (B, 64, D, H, W) -> Conv -> BN -> ReLU -> Residual -> Dropout -> (B, 128, D, H, W)
         spatial_feature = self._spatial_conv3(spatial_feature)
         spatial_feature = self._spatial_bn3(spatial_feature)
         spatial_feature = torch.relu(spatial_feature)
         spatial_feature = self._spatial_residual3(spatial_feature)
-        spatial_feature = self._spatial_dropout3(spatial_feature)
+        # spatial_feature = self._spatial_dropout3(spatial_feature)
 
         # (B, 128, D, H, W) -> GAP -> (B, 128, 1, 1, 1) -> 展平 -> (B, 128)
-        spatial_feature = self._spatial_gap(spatial_feature)
-        spatial_feature = spatial_feature.flatten(start_dim=1)
+        # spatial_feature = self._spatial_gap(spatial_feature)
+        # spatial_feature = spatial_feature.flatten(start_dim=1)
+        spatial_feat = self._spatial_flatten(spatial_feature)
+        spatial_feat = self._spatial_proj(spatial_feat)  # (B, 256)
 
         # --- 向量分支 ---
         # (B, 8) -> MLP -> Dropout -> (B, 64)
         vector_feature = self._vector_mlp(state_vector)
-        vector_feature = self._vector_dropout(vector_feature)
+        # vector_feature = self._vector_dropout(vector_feature)
 
-        # --- 融合层：使用 CrossAttentionFusion ---
-        # (B, 128) + (B, 64) -> CrossAttention -> (B, 256)
-        fused_feature = self._fusion(spatial_feature, vector_feature)
+        # # --- 融合层：使用 CrossAttentionFusion ---
+        # # (B, 128) + (B, 64) -> CrossAttention -> (B, 256)
+        # fused_feature = self._fusion(spatial_feature, vector_feature)
+        # --- 融合层：使用简单拼接 + MLP 替代 CrossAttentionFusion ---
+        fused = torch.cat([spatial_feat, vector_feature], dim=1) # (B, 320)
+        fused_feature = self._fusion_mlp(fused)               # (B, 256)
 
         # --- Actor-Critic 输出 ---
         # Actor: (B, 256) -> (B, 7)

@@ -113,7 +113,7 @@ ppo:
   # 学习率
   learning_rate: 3e-4
   # 折扣因子
-  gamma: 0.995
+  gamma: 0.90
   # GAE 衰减系数
   gae_lambda: 0.95
   # PPO 裁剪系数
@@ -131,7 +131,7 @@ ppo:
   # 是否在 RolloutBuffer 中持久化存储 spatial_input（默认为 true，便于调试和复现）
   store_spatial: true
   # 状态向量维度（可在此处修改 state_vector 的维度，默认为 8）
-  state_vector_dim: 9
+  state_vector_dim: 8
   # ----------------- 熵衰减配置（Entropy Decay） -----------------
   # 在训练早期使用配置中的 entropy_coef，随后按计划逐步衰减到 final_coef
   entropy_decay:

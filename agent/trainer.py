@@ -140,14 +140,14 @@ class PPOTrainer:
         self.global_step = 0
         self.episode = 0
         self.current_epoch = 0
-        
+
         # --- TensorBoard 日志记录器初始化 ---
         self.tb_writer = None
         self.tb_log_interval = cfg.trainer.tensorboard.log_interval_steps
         self.tb_hist_interval = cfg.trainer.tensorboard.hist_interval_epochs
         self.tb_flush_interval = cfg.trainer.tensorboard.flush_interval_seconds
         self.tb_minibatch_counter = 0  # 用于控制标量日志记录频率
-        
+
         if cfg.trainer.tensorboard.enabled and output_dir is not None:
             tb_log_dir = output_dir / cfg.trainer.tensorboard.subdir
             tb_log_dir.mkdir(parents=True, exist_ok=True)
@@ -228,6 +228,9 @@ class PPOTrainer:
         step_count = 0
 
         env.reset()
+        # 当发生截断（trunced）时，可能需要为该步计算并保存 bootstrap 的 next_value，
+        # 以便后续 compute_gae_returns 在缓冲区末尾使用正确的引导值。
+        bootstrap_next_value_for_buffer = None
 
         with torch.no_grad():
             while step_count < num_steps:
@@ -245,7 +248,7 @@ class PPOTrainer:
                 logprob = action_dist.log_prob(action)
 
                 # 执行环境步
-                next_pos, reward, done, info = env.step(action.item())
+                next_pos, reward, done, terminate, trunced, info = env.step(action.item())
                 episode_reward += reward
                 episode_length += 1
 
@@ -258,35 +261,56 @@ class PPOTrainer:
                     reward=reward,
                     done=done,
                     value=value,
+                    terminate=terminate,
+                    trunced=trunced,
                 )
 
                 total_reward += reward
                 step_count += 1
 
                 # 处理 episode 结束
-                if done or episode_length >= max_episode_steps:
-                    # 计算终止状态的价值估计
-                    if done:
+                # 对于终止或截断（或者达到外部限制）需要结束本 episode，并为截断样本进行 bootstrap
+                if terminate or trunced or episode_length >= max_episode_steps:
+                    # 真实终止（撞山/死亡/胜利）不进行 bootstrap，next_value=0
+                    if terminate:
                         next_value = 0.0
                     else:
+                        # 截断或达到外部最大步数：使用当前网络对下一状态估值作为 bootstrap
                         next_spatial, next_state_vec = env.get_observation_tensor(
                             device=self.device
                         )
-                        _, next_value = self.model(next_spatial, next_state_vec)
-                        next_value = next_value.item()
+                        _, next_value_tensor = self.model(next_spatial, next_state_vec)
+                        next_value = float(next_value_tensor.item())
+                    # 保存用于在缓冲区末尾作为 bootstrap 的值（如果最后一步是截断）
+                    bootstrap_next_value_for_buffer = next_value
+
+                    reward_details = info.get("total_reward_details", {})
+                    stealth_reward = float(reward_details.get('sum_隐蔽奖励', 0.0))
+                    approach_reward = float(reward_details.get('sum_靠近奖励', 0.0))
+                    tl_gradient_reward = float(reward_details.get('sum_TL梯度奖励', 0.0))
+                    area_average_tl_reward = float(reward_details.get('sum_范围平均TL奖励', 0.0))
+                    fixed_time_penalty = float(reward_details.get('sum_固定时间惩罚', 0.0))
+
+                    reward_breakdown = (
+                        f"隐蔽奖励={stealth_reward:.2f}, "
+                        f"TL梯度奖励={tl_gradient_reward:.2f}, "
+                        f"靠近奖励={approach_reward:.2f}, "
+                        f"范围平均TL奖励={area_average_tl_reward:.2f}, "
+                        f"固定时间惩罚={fixed_time_penalty:.2f}"
+                    )
 
                     # 对于成功到达终点的情况，日志使用 print_success 打印
                     if "胜利" in info.get('result', ''):
                         print_success(
-                            f"Episode {num_episodes} 结束: 奖励={episode_reward:.2f}, "
+                            f"Episode {num_episodes} 结束: 总奖励={episode_reward:.2f} | {reward_breakdown}, "
                             f"步数={episode_length}, 理由={info.get('result', 'max_steps')}"
                         )
                     else:
                         print_info(
-                            f"Episode {num_episodes} 结束: 奖励={episode_reward:.2f}, "
+                            f"Episode {num_episodes} 结束: 总奖励={episode_reward:.2f} | {reward_breakdown}, "
                             f"步数={episode_length}, 理由={info.get('result', 'max_steps')}"
                         )
-                    
+
                     # 记录 episode 指标到 TensorBoard
                     if self.tb_writer is not None:
                         self.tb_writer.add_scalar('episode/reward', episode_reward, self.episode + num_episodes)
@@ -300,11 +324,39 @@ class PPOTrainer:
                     # 重置环境
                     env.reset()
 
-        # 计算 GAE 与回报
+        # 计算 GAE 与回报：使用正确的 bootstrap next_value。
+        # 若最后一步未结束 episode，则使用最后观测的 value 作为 bootstrap，否则为 0.0。
+        with torch.no_grad():
+            if getattr(self.buffer, 'ptr', 0) == 0:
+                next_value = 0.0
+            else:
+                # 使用缓冲区中记录的 terminates/trunced 标志判断末尾样本类型
+                try:
+                    last_terminate = bool(self.buffer.terminates[self.buffer.ptr - 1].item())
+                    last_trunced = bool(self.buffer.trunced[self.buffer.ptr - 1].item())
+                except Exception:
+                    # 兼容性回退到旧的 dones 标志
+                    try:
+                        last_terminate = bool(self.buffer.dones[self.buffer.ptr - 1].item())
+                    except Exception:
+                        last_terminate = True
+                    last_trunced = False
+
+                if last_terminate:
+                    next_value = 0.0
+                elif last_trunced and bootstrap_next_value_for_buffer is not None:
+                    # 如果最后一步是截断，并且在收集时我们为其计算了 bootstrap 值，则直接使用它
+                    next_value = float(bootstrap_next_value_for_buffer)
+                else:
+                    # 否则按常规评估当前环境观测作为 bootstrap
+                    next_spatial, next_state_vec = env.get_observation_tensor(device=self.device)
+                    _, next_value_tensor = self.model(next_spatial, next_state_vec)
+                    next_value = float(next_value_tensor.item())
+
         self.buffer.compute_gae_returns(
             gamma=self.gamma,
             gae_lambda=self.gae_lambda,
-            next_value=0.0,
+            next_value=next_value,
         )
 
         reward_mean = total_reward / step_count if step_count > 0 else 0.0
@@ -414,7 +466,7 @@ class PPOTrainer:
 
                 self.global_step += 1
                 self.tb_minibatch_counter += 1
-                
+
                 # 记录标量指标到 TensorBoard（根据记录间隔）
                 if self.tb_writer is not None and (self.tb_log_interval == 0 or self.tb_minibatch_counter % self.tb_log_interval == 0):
                     self.tb_writer.add_scalar('train/policy_loss', policy_loss.item(), self.global_step)
@@ -442,7 +494,7 @@ class PPOTrainer:
         self.current_epoch += 1
         current_lr = self.optimizer.param_groups[0]['lr']
         print_info(f"Epoch {self.current_epoch} LR调度完成，当前学习率: {current_lr:.6f}")
-        
+
         # 周期性记录权重和梯度直方图
         if self.tb_writer is not None and self.current_epoch % self.tb_hist_interval == 0:
             for name, param in self.model.named_parameters():

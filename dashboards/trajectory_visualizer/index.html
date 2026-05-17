@@ -1,0 +1,97 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>强化学习轨迹回放面板</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <link rel="stylesheet" href="./css/style.css" />
+</head>
+<body>
+  <header>
+    <div class="title-block">
+      <h1>强化学习轨迹回放面板</h1>
+      <p>可视化回放强化学习的游戏轨迹。显示 UUV 和敌方的 3D 运动轨迹，以及每一步的详细奖励信息。</p>
+    </div>
+  </header>
+
+  <main>
+    <!-- 左侧侧边栏 -->
+    <aside class="sidebar">
+      
+      <!-- 日志选择区域 -->
+      <div class="card section">
+        <h2>📁 日志选择</h2>
+        <div class="log-selection">
+          <div class="input-group">
+            <label for="logPath">日志文件：</label>
+            <input 
+              type="text" 
+              id="logPath" 
+              class="log-path-input" 
+              placeholder="自动加载最新日志..." 
+              readonly
+            />
+            <button id="browseLogs" class="btn-small" title="选择其他日志文件">📂</button>
+          </div>
+          <button id="refreshLogs" class="btn-primary" title="刷新日志目录">🔄 刷新目录</button>
+        </div>
+      </div>
+
+      <!-- 游戏计数区域 -->
+      <div class="card section">
+        <h2>🎮 游戏选择</h2>
+        <div class="game-selection">
+          <div class="stat-item">
+            <span class="stat-label">总游戏数：</span>
+            <span class="stat-value" id="gameCount">-</span>
+          </div>
+          <div class="input-group">
+            <label for="episodeInput">加载轮数：</label>
+            <input 
+              type="number" 
+              id="episodeInput" 
+              class="episode-input" 
+              min="0" 
+              placeholder="输入轮数..." 
+            />
+          </div>
+          <button id="loadEpisode" class="btn-primary" title="加载指定轮的游戏">▶ 加载游戏</button>
+        </div>
+      </div>
+
+      <!-- 游戏元信息区域 -->
+      <div class="card section">
+        <h2>ℹ️ 游戏信息</h2>
+        <div class="meta-grid" id="episodeInfo">
+          <div class="meta-item">
+            <div class="meta-label">状态</div>
+            <div class="meta-value">-</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 详情面板 -->
+      <div class="card section">
+        <h2>📊 Step 详情（鼠标悬停）</h2>
+        <div class="step-details" id="stepDetails">
+          <div class="detail-empty">鼠标悬停轨迹点以显示详情</div>
+        </div>
+      </div>
+
+      <!-- 状态文本 -->
+      <div class="card section">
+        <div class="status" id="statusText">✓ 系统就绪</div>
+      </div>
+
+    </aside>
+
+    <!-- 右侧 3D 绘制区域 -->
+    <section class="card plot-card">
+      <div id="plot"></div>
+    </section>
+  </main>
+
+  <script src="./js/main.js"></script>
+</body>
+</html>

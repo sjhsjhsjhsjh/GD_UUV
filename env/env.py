@@ -2,8 +2,12 @@ import numpy as np
 from omegaconf import DictConfig
 import random
 from pathlib import Path
+from typing import Optional
 from torch import Tensor, from_numpy
 from numpy import tanh
+import socket
+import threading
+import time
 
 from utils.rich_print import log, print_info, print_error, print_warn, print_debug, print_success
 from utils.terminal_monitor import TerminalMonitor
@@ -25,11 +29,11 @@ class Env:
     terrain_3d: np.ndarray
     """3D可通性布尔转float32数组，1.0表示可通行，0.0表示不可通行，shape=(map_width, map_height, map_depth)"""
 
-    def __init__(self, cfg: DictConfig) -> None:
+    def __init__(self, cfg: DictConfig, output_dir: Optional[Path] = None, enable_step_log_server: bool = False, step_log_port: int = 8766) -> None:
         """环境类，核心训练场景
 
         :param cfg: 配置对象，包含环境参数
-        :param console: rich Console 对象，用于打印日志
+        :param output_dir: 输出目录路径，用于保存日志和调试信息
         """
         self.cfg = cfg
 
@@ -76,9 +80,18 @@ class Env:
         self.max_recommand_step_scaling_factor = self.cfg.env.max_recommand_step_scaling_factor
         self.cumulative_acoustic_signal = 0
         self.reward = 0
+        # 这局游戏是否已经结束（不代表特定的结束原因）
         self.done = False
+        # 游戏终止（可能是胜利或者死亡，但一定不是超时截断）
         self.terminate = False
+        # 超时截断
+        self.trunced = False
         self.info = {}
+        self.sum_隐蔽奖励 = 0
+        self.sum_靠近奖励 = 0
+        self.sum_TL梯度奖励 = 0
+        self.sum_范围平均TL奖励 = 0
+        self.sum_固定时间惩罚 = 0
 
         # 被动声呐探测方程 SL-TL-(NL-DI) > DT
         # SL: 135dB，NL: 85dB，DI: 28dB，DT: 12dB, 代入方程，NL-DI=85-28=57dB,
@@ -150,6 +163,172 @@ class Env:
         self._test_save_tl_slices_as_images()
         self._test_terrain_slices_as_images()
 
+        # 处理 output_dir（可选），保证向后兼容：如果未提供，则回退到 cfg 或 ./output
+        if output_dir is None:
+            try:
+                # 如果配置中包含 runtime.output_dir（某些训练脚本/框架可能有），优先使用
+                if hasattr(cfg, 'runtime') and hasattr(cfg.runtime, 'output_dir'):
+                    output_dir = Path(cfg.runtime.output_dir)
+                else:
+                    output_dir = Path("output")
+            except Exception:
+                output_dir = Path("output")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 创建并打开一个文本文件作为 step 级日志
+        self.step_log_file = open(output_dir / "step_log.txt", "w")
+
+        # Step-log TCP server 相关字段（默认关闭）
+        self._step_log_enabled = bool(enable_step_log_server)
+        self._step_log_port = int(step_log_port)
+        self._step_log_server_socket = None
+        self._step_log_client_socket = None
+        self._step_log_thread = None
+        self._step_log_lock = threading.Lock()
+        self._step_log_running = False
+
+        # 如果启用，则启动后台 TCP 服务（仅本机、单客户端）
+        if self._step_log_enabled:
+            try:
+                self._start_step_log_server()
+            except Exception as e:
+                print_warn(f"无法启动 step log server: {e}")
+
+    def _start_step_log_server(self):
+        """启动后台 TCP 服务（仅本机、单客户端）。"""
+        if self._step_log_running:
+            return
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", self._step_log_port))
+            s.listen(1)
+            s.settimeout(1.0)
+            self._step_log_server_socket = s
+            self._step_log_running = True
+            self._step_log_thread = threading.Thread(target=self._step_log_server_thread, daemon=True)
+            self._step_log_thread.start()
+            print_info(f"Step log TCP server started on 127.0.0.1:{self._step_log_port}")
+        except Exception as e:
+            self._step_log_running = False
+            try:
+                s.close()
+            except Exception:
+                pass
+            self._step_log_server_socket = None
+            print_warn(f"无法启动 step log server: {e}")
+
+    def _step_log_server_thread(self):
+        """后台线程：接受客户端并维持连接，检测断开。"""
+        s = self._step_log_server_socket
+        while self._step_log_running and s is not None:
+            try:
+                client, addr = s.accept()
+                client.settimeout(1.0)
+                with self._step_log_lock:
+                    if self._step_log_client_socket:
+                        try:
+                            self._step_log_client_socket.close()
+                        except Exception:
+                            pass
+                    self._step_log_client_socket = client
+                print_info(f"Step log client connected: {addr}")
+                # 等待客户端断开（客户端通常不发送数据），通过 recv 检测断开
+                while self._step_log_running:
+                    try:
+                        data = client.recv(1024)
+                        if not data:
+                            break
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+                with self._step_log_lock:
+                    try:
+                        self._step_log_client_socket.close()
+                    except Exception:
+                        pass
+                    self._step_log_client_socket = None
+                print_info("Step log client disconnected")
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            except Exception as e:
+                print_warn(f"Step log accept error: {e}")
+                time.sleep(0.5)
+        try:
+            if self._step_log_server_socket:
+                self._step_log_server_socket.close()
+        except Exception:
+            pass
+        self._step_log_server_socket = None
+        self._step_log_running = False
+
+    def stop_step_log_server(self):
+        """停止 step log server 并关闭 socket（可安全重复调用）。"""
+        self._step_log_running = False
+        with self._step_log_lock:
+            if self._step_log_client_socket:
+                try:
+                    self._step_log_client_socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    self._step_log_client_socket.close()
+                except Exception:
+                    pass
+                self._step_log_client_socket = None
+        if self._step_log_server_socket:
+            try:
+                self._step_log_server_socket.close()
+            except Exception:
+                pass
+            self._step_log_server_socket = None
+        print_info("Step log server stopped")
+
+    def _step_log_write(self, text: str):
+        """写入 step log 文件并同步发送到已连接客户端（若有）。"""
+        try:
+            self.step_log_file.write(text)
+            try:
+                self.step_log_file.flush()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        if not getattr(self, '_step_log_enabled', False):
+            return
+        with self._step_log_lock:
+            client = self._step_log_client_socket
+        if client:
+            try:
+                client.sendall(text.encode('utf-8'))
+            except Exception as e:
+                with self._step_log_lock:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    self._step_log_client_socket = None
+                print_warn(f"Step log send failed, disconnected client: {e}")
+
+    def __del__(self):
+        try:
+            self.stop_step_log_server()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'step_log_file') and self.step_log_file:
+                try:
+                    self.step_log_file.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    
+
     def _test_terrain_slices_as_images(self):
         """测试：保存地形切片图像，验证坐标对应关系"""
         import matplotlib.pyplot as plt
@@ -158,14 +337,14 @@ class Env:
         output_dir = Path("output/terrain_slices")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        p1_x = 79
-        p1_y = 31
-        p1_z = 2
-        print_info("terrain_3d[{}, {}, {}] = {}".format(p1_x, p1_y, p1_z, self.terrain_3d[p1_x, p1_y, p1_z]))
-        p2_x = 87
-        p2_y = 48
-        p2_z = 4
-        print_info("terrain_3d[{}, {}, {}] = {}".format(p2_x, p2_y, p2_z, self.terrain_3d[p2_x, p2_y, p2_z]))
+        # p1_x = 79
+        # p1_y = 31
+        # p1_z = 2
+        # print_info("terrain_3d[{}, {}, {}] = {}".format(p1_x, p1_y, p1_z, self.terrain_3d[p1_x, p1_y, p1_z]))
+        # p2_x = 87
+        # p2_y = 48
+        # p2_z = 4
+        # print_info("terrain_3d[{}, {}, {}] = {}".format(p2_x, p2_y, p2_z, self.terrain_3d[p2_x, p2_y, p2_z]))
 
         x = np.arange(self.terrain_3d.shape[0])
         y = np.arange(self.terrain_3d.shape[1])
@@ -181,12 +360,12 @@ class Env:
             plt.title(f"Terrain Slice at z={z} (Depth {z * self.cfg.env.sampling_z_step}m)")
             plt.xlabel("X Coordinate (grid index)")
             plt.ylabel("Y Coordinate (grid index)")
-            # 画出 P1 和 P2 的位置，标记具有一定透明度
-            if z == p1_z:
-                plt.scatter([p1_x], [p1_y], color="red", marker="o", label="P1 (79, 31, 2)", alpha=0.5)
-            if z == p2_z:
-                plt.scatter([p2_x], [p2_y], color="blue", marker="x", label="P2 (87, 48, 4)", alpha=0.5)
-            plt.legend()
+            # # 画出 P1 和 P2 的位置，标记具有一定透明度
+            # if z == p1_z:
+            #     plt.scatter([p1_x], [p1_y], color="red", marker="o", label="P1 (79, 31, 2)", alpha=0.5)
+            # if z == p2_z:
+            #     plt.scatter([p2_x], [p2_y], color="blue", marker="x", label="P2 (87, 48, 4)", alpha=0.5)
+            # plt.legend()
             plt.savefig(output_dir / f"terrain_slice_z{z}.png", bbox_inches="tight", dpi=150)
             plt.close()
 
@@ -267,8 +446,14 @@ class Env:
         self.reward = 0
         self.done = False
         self.terminate = False
+        self.trunced = False
         self.info = {}
         self.now_step = 0
+        self.sum_隐蔽奖励 = 0
+        self.sum_靠近奖励 = 0
+        self.sum_TL梯度奖励 = 0
+        self.sum_范围平均TL奖励 = 0
+        self.sum_固定时间惩罚 = 0
         temp = self._query_TL(self.enemy.y, self.uuv.x, self.uuv.y, self.uuv.z)
         self.上次TL = temp
         self.当前TL = temp
@@ -277,6 +462,9 @@ class Env:
         self.recommended_steps = self.manhattan_distance * self.recommand_step_scaling_factor
         self.recommended_max_steps = self.manhattan_distance * self.max_recommand_step_scaling_factor
         self.计算范围平均TL奖励() # 内部填充 self.区域平均TL
+
+        # 写入step级日志（同时发送到 TCP 客户端，如果已连接）
+        self._step_log_write(f"{self.uuv.x},{self.uuv.y},{self.uuv.z},{self.enemy.y},{self.enemy_forward_direction}\n")
 
         # print_info(f"环境重置完成: 我方机器人初始位置 ({self.uuv.x}, {self.uuv.y}, {self.uuv.z}), 敌方机器人初始位置 ({self.enemy.x}, {self.enemy.y}, {self.enemy.z}), 推荐最短路径步数 {self.recommended_steps:.2f}")
 
@@ -297,15 +485,27 @@ class Env:
             self.uuv.y < self.uuv_y_min_index or self.uuv.y > self.uuv_y_max_index or
             self.uuv.z < self.uuv_z_min_index or self.uuv.z > self.uuv_z_max_index):
             self.done = True
-            self.reward = -10
+            self.terminate = True
+            self.trunced = False
+            self.reward = -4
             self.info['result'] = '超出边界, 位置: ({}, {}, {})'.format(self.uuv.x, self.uuv.y, self.uuv.z)
         # 撞山，立即死亡
         if (not self.done and self.terrain_3d[self.uuv.x, self.uuv.y, self.uuv.z] <= 0.5):
             self.done = True
-            self.reward = -10
+            self.terminate = True
+            self.trunced = False
+            self.reward = -4
             self.info['result'] = '撞山, 位置: ({}, {}, {})'.format(self.uuv.x, self.uuv.y, self.uuv.z)
 
-        # 仅在不越界、不撞山的情况下，才查询 TL 表（避免数组越界）
+        # 达到推荐步数上限，立即死亡
+        if (self.now_step > self.recommended_max_steps):
+            self.done = True
+            self.terminate = False
+            self.trunced = True
+            self.reward = -3
+            self.info['result'] = '超出推荐步数上限, 当前步数: {}, 推荐最大步数: {:.2f}, 当前位置:({}, {}, {})'.format(self.now_step, self.recommended_max_steps, self.uuv.x, self.uuv.y, self.uuv.z)
+
+        # 仅在不越界、不撞山、不超时的情况下，才查询 TL 表（避免数组越界）
         if not self.done:
             # 3.查询计算声呐信号强度和奖励
             last_TL = self._query_TL(self.enemy.y, *self.last_uuv_location)
@@ -324,21 +524,20 @@ class Env:
             # 被发现，立即死亡
             if (self.cumulative_acoustic_signal > self.tl_tolerance * 2.2):  # 累积声呐信号强度超过探测阈值的2.2倍，认为被发现
                 self.done = True
-                self.reward = -3
+                self.terminate = True
+                self.trunced = False
+                self.reward = -1
                 self.info['result'] = '被发现, 累计声信号强度: {:.2f} dB, 当前位置: ({}, {}, {}), 敌方当前位置: {}, 步数: {}, 当前TL: {:.2f}, 上次TL: {:.2f}'.format(self.cumulative_acoustic_signal, self.uuv.x, self.uuv.y, self.uuv.z, self.enemy.y, self.now_step, self.当前TL, self.上次TL)
-            # 达到推荐步数上限，立即死亡
-            if (not self.done and self.now_step > self.recommended_max_steps):
-                self.done = True
-                self.reward = -6
-                self.info['result'] = '超出推荐步数上限, 当前步数: {}, 推荐最大步数: {:.2f}'.format(self.now_step, self.recommended_max_steps)
             # 达到敌人附近位置，立即胜利
-            if (not self.done and self.uuv.x <= self.victory_x_idx):
+            if (not self.done and not self.terminate and self.uuv.x <= self.victory_x_idx):
                 self.done = True
-                self.reward = 20
+                self.terminate = True
+                self.trunced = False
+                self.reward = 4
                 self.info['result'] = '胜利, 达到敌人附近位置: ({}, {}, {}), 消耗步数: {}, 与曼哈顿距离比例: {:.2f}'.format(self.uuv.x, self.uuv.y, self.uuv.z, self.now_step, self.now_step / self.manhattan_distance)
 
             # 4.计算本步奖励（仅当未触发死亡条件时）
-            if not self.done:
+            if (not self.done):
                 # 隐蔽性奖励
                 隐蔽奖励 = self.计算隐蔽奖励(now_TL)
                 # 靠近奖励
@@ -348,14 +547,28 @@ class Env:
                 # 范围平均 TL 奖励
                 范围平均TL奖励 = self.计算范围平均TL奖励()
                 # 固定时间惩罚
-                固定时间惩罚 = - 1 / self.recommended_steps * 8
+                固定时间惩罚 = -1
+
+                scale_factor = 0.025
+                隐蔽奖励 = 隐蔽奖励 * scale_factor  # 均值 [-1.3~0.8]
+                TL梯度奖励 = TL梯度奖励 * scale_factor  # 均值 [-1.3~0.8]
+                靠近奖励 = 2 * 靠近奖励 * scale_factor  # 均值 [-2.6~1.6]
+                范围平均TL奖励 = 0.3 * 范围平均TL奖励 * scale_factor  # 均值 [-0.4~0.24]
+                固定时间惩罚 = 固定时间惩罚 * scale_factor  
 
                 self.reward = 隐蔽奖励 + TL梯度奖励 + 靠近奖励 + 范围平均TL奖励 + 固定时间惩罚
-                self.info['reward_details'] = {
-                    'stealth_reward': 隐蔽奖励,
-                    'approach_reward': 靠近奖励,
-                    'tl_gradient_reward': TL梯度奖励,
-                    'area_average_tl_reward': 范围平均TL奖励
+
+                self.sum_隐蔽奖励 = self.sum_隐蔽奖励 + 隐蔽奖励
+                self.sum_靠近奖励 = self.sum_靠近奖励 + 靠近奖励
+                self.sum_TL梯度奖励 = self.sum_TL梯度奖励 + TL梯度奖励
+                self.sum_范围平均TL奖励 = self.sum_范围平均TL奖励 + 范围平均TL奖励
+                self.sum_固定时间惩罚 = self.sum_固定时间惩罚 + 固定时间惩罚
+                self.info['total_reward_details'] = {
+                    'sum_隐蔽奖励': self.sum_隐蔽奖励,
+                    'sum_靠近奖励': self.sum_靠近奖励,
+                    'sum_TL梯度奖励': self.sum_TL梯度奖励,
+                    'sum_范围平均TL奖励': self.sum_范围平均TL奖励,
+                    'sum_固定时间惩罚': self.sum_固定时间惩罚
                 }
             else:
                 # 如果触发死亡条件，reward 已在条件分支中设置，只需设置空的 reward_details
@@ -363,13 +576,26 @@ class Env:
                     'stealth_reward': 0,
                     'approach_reward': 0,
                     'tl_gradient_reward': 0,
-                    'area_average_tl_reward': 0
+                    'area_average_tl_reward': 0,
+                    'fixed_time_penalty': 0
                 }
+
+        self.info["total_reward_details"] = {
+            "sum_隐蔽奖励": self.sum_隐蔽奖励,
+            "sum_靠近奖励": self.sum_靠近奖励,
+            "sum_TL梯度奖励": self.sum_TL梯度奖励,
+            "sum_范围平均TL奖励": self.sum_范围平均TL奖励,
+            "sum_固定时间惩罚": self.sum_固定时间惩罚,
+        }
 
         # 5.令敌人随机移动一步，敌人只能沿着y轴随机移动，且不能进入不可通行区域
         self._enemy_step()
 
-        return (self.uuv.x, self.uuv.y, self.uuv.z), self.reward, self.done, self.info
+        self._step_log_write(f"{action}")
+        if self.done:
+            self._step_log_write(f"#\n")
+
+        return (self.uuv.x, self.uuv.y, self.uuv.z), self.reward, self.done, self.terminate, self.trunced, self.info
 
     def _load_tl_from_txt(self, tl_file_path: str):
         """从文本文件加载TL信息，构建一个字典以供查询。文本文件内容为 enemy_y,uuv_x,uuv_y,uuv_z,tl
@@ -425,8 +651,8 @@ class Env:
 
             随机游动会使得 E(enemy_y) 方差过大，导致训练不稳定，因此暂时取消随机游动。可以考虑在轮数靠后的时候加入随机游动，增加环境的多样性。
         """
-        if random.random() < 0.15:  # 有概率原地不动
-            return
+        # if random.random() < 0.15:  # 有概率原地不动
+        #     return
 
         new_y = self.enemy.y + self.enemy_forward_direction
         # 如果敌人到达巡逻边界，改变方向
@@ -459,11 +685,24 @@ class Env:
         :return: 隐蔽奖励，数值越大表示越隐蔽
         """
         # 安全隐蔽区: TL > proper_TL + 3dB，奖励为正，且随着TL增加而增加
-        temp = tanh((TL-66.0)/self.tl_tolerance) / self.recommended_steps
+        temp = tanh((TL-66.0)/self.tl_tolerance)
+
+        dist_factor = (self.uuv.x - self.victory_x_idx) / (self.uuv_start_x - self.victory_x_idx) # 剩余距离占初始距离的比例
+        dist_factor = 1 - dist_factor  # 转换为接近敌人时奖励更高的形式
+        if (dist_factor < 0.25):
+            dist_factor = 0.25
+        elif (dist_factor >= 0.25 and dist_factor < 0.5):
+            dist_factor = 0.5
+        elif (dist_factor >= 0.5 and dist_factor < 0.75):
+            dist_factor = 0.75
+        else:           
+            dist_factor = 1.0
+        temp = temp * dist_factor
+
         if (temp > 0):
             return temp * 0.8
         else:
-            return temp * 1.5
+            return temp * 1.3
 
     def 计算靠近奖励(self, action):
         """根据动作计算靠近奖励，接近敌人奖励为正，远离敌人奖励为负
@@ -492,9 +731,15 @@ class Env:
         distance_diff = abs(self.last_uuv_location[0] - self.victory_x_idx) - current_distance
 
         # 给予奖励 (权重可以微调)
-        approach_reward = distance_diff / self.recommended_steps * 2
+        approach_reward = distance_diff 
 
-        return approach_reward
+        if (distance_diff == 0):
+            approach_reward = -0.3
+
+        if approach_reward > 0:
+            return approach_reward * 0.8
+        else:
+            return approach_reward * 1.3
 
     def 计算TL梯度奖励(self, last_TL, now_TL):
         """根据传播损失 TL 的变化计算梯度奖励，TL 下降奖励为正，TL 上升奖励为负
@@ -503,7 +748,14 @@ class Env:
         :param now_TL: 当前的传播损失，单位dB
         :return: TL梯度奖励，数值越大表示TL下降越多（更隐蔽）
         """
-        return tanh(2 * (last_TL - now_TL)/self.tl_tolerance) / self.recommended_steps
+        # temp = tanh(2 * (last_TL - now_TL) / self.tl_tolerance)
+        temp = last_TL - now_TL
+        temp = np.clip(temp, -self.tl_tolerance * 1.5, self.tl_tolerance * 1.5) / (self.tl_tolerance * 1.5)
+
+        if (temp > 0):
+            return temp * 0.8
+        else:
+            return temp * 1.3
 
     def 计算范围平均TL奖励(self):
         """计算以我方机器人为中心、边长为 field_of_view 的立方体范围内的平均 TL，并根据平均 TL 计算奖励
@@ -552,7 +804,14 @@ class Env:
 
         average_tl = 0.7 * np.mean(core_tl_values) + 0.3 * np.mean(tl_values)
         self.区域平均TL = average_tl
-        return tanh(1.5*(average_tl-66.0)/self.tl_tolerance) / self.recommended_steps
+        average_tl = average_tl - 66.0
+
+        temp = np.clip(average_tl, -self.tl_tolerance * 1.5, self.tl_tolerance * 1.5) / (self.tl_tolerance * 1.5)
+
+        if (temp > 0):
+            return temp * 0.8
+        else:
+            return temp * 1.3
 
     def get_observation_tensor(self, device: str = "cuda"):
         """为 ACNet 生成观测张量（spatial_input 与 state_vector）。
@@ -660,7 +919,7 @@ class Env:
         # x_dist = (self.uuv.x - self.victory_x_idx) / (self.map_width - self.victory_x_idx)
         # x_dist = x_dist * 2 - 1
         # X dist 零均值化
-        x_dist = 1 - (self.uuv.x - self.victory_x_idx) / (self.uuv_start_x_min_idx - self.victory_x_idx)
+        x_dist = 1 - (self.uuv.x - self.victory_x_idx) / (self.uuv_start_x - self.victory_x_idx)
 
         # 累计观测部分，平方以增强靠近 1 时的差异化数值
         _cumulative_acoustic_signal = np.clip(self.cumulative_acoustic_signal, 0, self.tl_tolerance * 2.2) # 限幅，防止过大数值导致训练不稳定
@@ -682,7 +941,7 @@ class Env:
                     float(x_dist),  # 与胜利位置的相对 x 坐标，并且进行归一化（0-1）
                     float(self.uuv.y / self.map_height),
                     float((self.uuv.z - 3) / 3.0),
-                    float(self.enemy.y / self.map_height),
+                    # float(self.enemy.y / self.map_height),
                     float(tanh((self.当前TL - 66.0) / (self.tl_tolerance * 1.5))),      # 当前 TL
                     float(clipped_grad),                                        # TL 梯度（经过限幅和归一化）
                     float(tanh((self.区域平均TL - 66.0) / (self.tl_tolerance * 1.5))),   # 范围平均 TL（经过归一化）

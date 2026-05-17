@@ -71,7 +71,13 @@ class RolloutBuffer:
         self.actions = torch.zeros(capacity, dtype=torch.long, device=device)
         self.logprobs = torch.zeros(capacity, dtype=torch.float32, device=device)
         self.rewards = torch.zeros(capacity, dtype=torch.float32, device=device)
+        # 原有的 done 标志（保持兼容）
         self.dones = torch.zeros(capacity, dtype=torch.bool, device=device)
+        # 新增：区分截断（trunced）与真实终止（terminate）
+        # - trunced: 由时间/步数限制导致的截断（应当进行 bootstrap）
+        # - terminates: 真实的终止（碰撞、死亡、胜利），在 GAE 中会切断未来价值传播
+        self.trunced = torch.zeros(capacity, dtype=torch.bool, device=device)
+        self.terminates = torch.zeros(capacity, dtype=torch.bool, device=device)
         self.values = torch.zeros(capacity, dtype=torch.float32, device=device)
         self.returns = None  # 在 compute_gae_returns 时计算
         self.advantages = None  # 在 compute_gae_returns 时计算
@@ -85,6 +91,8 @@ class RolloutBuffer:
         reward: float,
         done: bool,
         value: torch.Tensor,
+        terminate: bool = False,
+        trunced: bool = False,
     ) -> None:
         """添加一步经验到缓冲区。
 
@@ -100,6 +108,8 @@ class RolloutBuffer:
             logprob (torch.Tensor): 形状 () 或 (1,)，动作的 log 概率。
             reward (float): 获得的奖励值。
             done (bool): 是否游戏结束。
+            terminate (bool): 是否为真实终止（撞山、死亡或胜利）。仅当为 True 时在 GAE 中切断未来价值传播。
+            trunced (bool): 是否为截断（达到步数/时间限制）。截断样本应当使用 bootstrap 的 next_value 进行回报补全。
             value (torch.Tensor): 形状 () 或 (1,)，当前状态价值估计。
 
         输出参数:
@@ -175,7 +185,10 @@ class RolloutBuffer:
             logprob.item() if isinstance(logprob, torch.Tensor) else logprob
         )
         self.rewards[self.ptr] = reward
-        self.dones[self.ptr] = done
+        # 存储三类标志，后续 GAE 计算中使用 terminates 作为是否切断未来价值的判定
+        self.dones[self.ptr] = bool(done)
+        self.trunced[self.ptr] = bool(trunced)
+        self.terminates[self.ptr] = bool(terminate)
         self.values[self.ptr] = value.item() if isinstance(value, torch.Tensor) else value
 
         self.ptr += 1
@@ -280,30 +293,35 @@ class RolloutBuffer:
         self.returns = torch.zeros(num_steps, dtype=torch.float32, device=self.device)
 
         # 反向递推计算 GAE
-        last_value = next_value
         last_advantage = 0.0
 
         for t in reversed(range(num_steps)):
+            # 下一个状态的 value：若不是缓冲区末尾，使用缓冲区中下一个步的 value；否则使用外部传入的 next_value（bootstrap）
             if t == num_steps - 1:
-                next_value_t = next_value
+                next_value_t = float(next_value)
             else:
-                next_value_t = self.values[t + 1].item()
+                next_value_t = float(self.values[t + 1].item())
 
-            # 计算 TD 残差
-            td_residual = (
-                self.rewards[t]
-                + gamma * (1 - self.dones[t].float()) * next_value_t
-                - self.values[t].item()
-            )
+            # 使用 terminates 标志决定是否切断未来价值传播（terminate=True 切断，trunced=True 不切断）
+            try:
+                terminate_flag = float(self.terminates[t].item())
+            except Exception:
+                terminate_flag = float(self.dones[t].item()) if self.dones is not None else 1.0
 
-            # 累积 GAE 优势
-            advantage = (
-                td_residual
-                + gamma * gae_lambda * (1 - self.dones[t].float()) * last_advantage
-            )
+            non_terminal = 1.0 - terminate_flag
+
+            # 当前步的 reward 与 value
+            reward_t = float(self.rewards[t].item())
+            value_t = float(self.values[t].item())
+
+            # TD 残差：仅在非真实终止时引入 next_value 的 contribution
+            td_residual = reward_t + gamma * non_terminal * next_value_t - value_t
+
+            # GAE 优势累积：仅在非真实终止时继续累积 last_advantage
+            advantage = td_residual + gamma * gae_lambda * non_terminal * last_advantage
 
             self.advantages[t] = advantage
-            self.returns[t] = advantage + self.values[t]
+            self.returns[t] = advantage + value_t
 
             last_advantage = advantage
 
